@@ -49,6 +49,22 @@ const STORAGE_KEYS = {
   LAST_PLAYED:    "hl_last_played",
 };
 
+function getPlayerUUID() {
+  const key = 'hl_uuid';
+  let uuid = null;
+  try { uuid = localStorage.getItem(key); } catch {}
+  if (!uuid) {
+    uuid = typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0;
+          return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        });
+    try { localStorage.setItem(key, uuid); } catch {}
+  }
+  return uuid;
+}
+
 function getStorage(key, fallback = null) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
   catch { return fallback; }
@@ -59,8 +75,7 @@ function setStorage(key, value) {
 }
 
 function getTodayString() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  return new Date().toISOString().split("T")[0];
 }
 
 // ── AI HEADLINE GENERATOR ────────────────────────────────────────────────────
@@ -154,37 +169,34 @@ async function getDailyHeadlines() {
     return { headlines: cachedHL, fromCache: true };
   }
 
-  // Load pool (seed + any AI-generated)
-  let pool    = getStorage(STORAGE_KEYS.POOL, SEED_HEADLINES);
-  let usedIds = getStorage(STORAGE_KEYS.USED_IDS, []);
+  // Always fetch fresh AI headlines for today
+  const usedIds = getStorage(STORAGE_KEYS.USED_IDS, []);
+  const usedTexts = usedIds.slice(-50);
 
-  // If pool is getting low (fewer than 10 unused), generate more
-  const unusedPool = pool.filter(h => !usedIds.includes(h.id));
-  if (unusedPool.length < 10) {
-    const newOnes = await generateNewHeadlines(usedIds, pool);
-    if (newOnes.length > 0) {
-      pool = [...pool, ...newOnes];
-      setStorage(STORAGE_KEYS.POOL, pool);
+  try {
+    const response = await fetch('/api/generate-headlines', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usedTexts }),
+    });
+    const data = await response.json();
+    const todaysHeadlines = (data.headlines || []).slice(0, 5).map(h => ({...h, context: h.context || h.explanation || ""}));
+
+    if (todaysHeadlines.length === 5) {
+      const newUsedIds = [...usedIds, ...todaysHeadlines.map(h => h.text)];
+      setStorage(STORAGE_KEYS.USED_IDS, newUsedIds);
+      setStorage(STORAGE_KEYS.TODAY_DATE, today);
+      setStorage(STORAGE_KEYS.TODAY_HEADLINES, todaysHeadlines);
+      return { headlines: todaysHeadlines, fromCache: false };
     }
+  } catch(e) {
+    console.error('API failed, using seed headlines', e);
   }
 
-  // Pick 5 from unused pool — use today's date as seed for consistent picks
-  const unused = pool.filter(h => !usedIds.includes(h.id));
-  const seed = today.split("-").reduce((a, n, i) => a + parseInt(n) * (i+1) * 31, 0);
-  const sorted = [...unused].sort((a, b) => {
-    const ra = Math.abs(Math.sin(seed * (a.id.charCodeAt(0)||1) * 9301) * 233280) % 1;
-    const rb = Math.abs(Math.sin(seed * (b.id.charCodeAt(0)||1) * 9301) * 233280) % 1;
-    return ra - rb;
-  });
-
-  const todaysHeadlines = sorted.slice(0, 5);
-
-  // Mark as used
-  const newUsedIds = [...usedIds, ...todaysHeadlines.map(h => h.id)];
-  setStorage(STORAGE_KEYS.USED_IDS, newUsedIds);
+  // Fallback to seed headlines only if API fails
+  const todaysHeadlines = SEED_HEADLINES.slice(0, 5);
   setStorage(STORAGE_KEYS.TODAY_DATE, today);
   setStorage(STORAGE_KEYS.TODAY_HEADLINES, todaysHeadlines);
-
   return { headlines: todaysHeadlines, fromCache: false };
 }
 
@@ -285,17 +297,183 @@ function ShareCard({ headlines, guesses, scores }) {
 }
 
 // ── MAIN APP ─────────────────────────────────────────────────────────────────
+
+// ── REVIEW SCREEN ─────────────────────────────────────────────────────────────
+function getSimulatedStats(year, score) {
+  const seed = year % 97;
+  const within1  = Math.floor(8  + (seed * 7)  % 12);
+  const within5  = Math.floor(31 + (seed * 13) % 28);
+  const within10 = Math.floor(58 + (seed * 11) % 22);
+  return { within1, within5, within10 };
+}
+
+function Timeline({ guessYear, actualYear }) {
+  const MIN = 1900, MAX = 2026;
+  const aPos = ((actualYear - MIN) / (MAX - MIN)) * 100;
+  const gPos = ((guessYear  - MIN) / (MAX - MIN)) * 100;
+  const exact = guessYear === actualYear;
+  const col = exact ? "#1a7c3a" : Math.abs(guessYear - actualYear) <= 5 ? "#2563a8" : "#b91c1c";
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ position: "relative", height: 20, marginBottom: 4 }}>
+        <div style={{ position: "absolute", top: 9, left: 0, right: 0, height: 2, background: "#e8e8e8", borderRadius: 1 }} />
+        <div style={{ position: "absolute", left: `${aPos}%`, top: 4, transform: "translateX(-50%)", width: 12, height: 12, borderRadius: "50%", background: "#121212", zIndex: 2 }} />
+        {!exact && <div style={{ position: "absolute", left: `${gPos}%`, top: 4, transform: "translateX(-50%)", width: 12, height: 12, borderRadius: "50%", background: "#fff", border: `2px solid ${col}`, zIndex: 2 }} />}
+        {!exact && <div style={{ position: "absolute", top: 8, left: `${Math.min(gPos, aPos)}%`, width: `${Math.abs(gPos - aPos)}%`, height: 4, background: col, opacity: 0.2 }} />}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        {[1920,1960,2000].map(y => <div key={y} style={{ fontFamily: "'Source Serif 4', serif", fontSize: 9, color: "#ccc" }}>{y}</div>)}
+      </div>
+      <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#121212" }} />
+          <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#555" }}>Actual: <strong>{actualYear}</strong></span>
+        </div>
+        {!exact && <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#fff", border: `2px solid ${col}` }} />
+          <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#555" }}>Your guess: <strong>{guessYear}</strong></span>
+        </div>}
+        {exact && <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#1a7c3a", fontStyle: "italic" }}>✓ Exact year</span>}
+      </div>
+    </div>
+  );
+}
+
+function ReviewScreen({ headlines, guesses, scores, onClose }) {
+  const [idx, setIdx] = useState(0);
+  const h = headlines[idx];
+  const g = guesses[idx];
+  const s = scores[idx];
+  const diff = Math.abs(g - h.year);
+  const stats = getSimulatedStats(h.year, s);
+  const diffLabel = diff === 0 ? "Exact year — extraordinary." : diff === 1 ? "Just 1 year off." : diff <= 5 ? `${diff} years off — very close.` : diff <= 15 ? `${diff} years off.` : `${diff} years off — wide of the mark.`;
+  const col = diff === 0 ? "#1a7c3a" : diff <= 5 ? "#2563a8" : "#b91c1c";
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#fff", zIndex: 100, overflowY: "auto" }}>
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "0 20px 40px" }}>
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 0 14px", borderBottom: "1px solid #e0e0e0", marginBottom: 24 }}>
+          <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 900, color: "#121212" }}>HEADLINE BY HEADLINE</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#888", cursor: "pointer" }}>✕ Close</button>
+        </div>
+
+        {/* Dot nav */}
+        <div style={{ display: "flex", gap: 6, justifyContent: "center", marginBottom: 24 }}>
+          {headlines.map((_, i) => <div key={i} onClick={() => setIdx(i)} style={{ width: i === idx ? 20 : 7, height: 7, borderRadius: 4, background: i === idx ? "#121212" : "#ddd", cursor: "pointer", transition: "all .2s" }} />)}
+        </div>
+
+        {/* Publication + year */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <div style={{ width: 3, height: 16, background: h.pubColor, borderRadius: 1 }} />
+          <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#888" }}>{h.publication} · {h.year}</span>
+        </div>
+
+        {/* Headline */}
+        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(16px,4.5vw,20px)", fontWeight: 900, color: "#121212", lineHeight: 1.3, marginBottom: 20, paddingBottom: 20, borderBottom: "1px solid #e0e0e0" }}>
+          {h.text}
+        </div>
+
+        {/* Your result */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+          <div>
+            <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 4 }}>Your result</div>
+            <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 13, color: col, fontStyle: "italic" }}>{diffLabel}</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 32, fontWeight: 900, color: "#121212", lineHeight: 1 }}>{s}</div>
+            <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#bbb" }}>/ 1,000</div>
+          </div>
+        </div>
+
+        {/* Timeline */}
+        <div style={{ borderTop: "1px solid #f0f0f0", paddingTop: 16, marginBottom: 20 }}>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 10 }}>Your guess on the timeline</div>
+          <Timeline guessYear={g} actualYear={h.year} />
+        </div>
+
+        {/* Simulated player stats */}
+        <div style={{ borderTop: "1px solid #f0f0f0", paddingTop: 16, marginBottom: 20 }}>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 14 }}>How all players did</div>
+          {[
+            { label: "Exact year", pct: stats.within1, color: "#1a7c3a" },
+            { label: "Within 5 years", pct: stats.within5, color: "#2563a8" },
+            { label: "Within 10 years", pct: stats.within10, color: "#888" },
+          ].map((row, i) => (
+            <div key={i} style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#444" }}>{row.label}</span>
+                <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 12, fontWeight: 600, color: row.color }}>{row.pct}%</span>
+              </div>
+              <div style={{ height: 4, background: "#f0f0f0", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${row.pct}%`, background: row.color, borderRadius: 2 }} />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Context */}
+        <div style={{ borderTop: "1px solid #f0f0f0", paddingTop: 16, marginBottom: 24 }}>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 10 }}>The story</div>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 13.5, lineHeight: 1.8, color: "#444" }}>{h.context}</div>
+        </div>
+
+        {/* Navigation */}
+        <div style={{ display: "flex", gap: 10 }}>
+          {idx > 0 && <button onClick={() => setIdx(idx - 1) || window.scrollTo({top: 0, behavior: "smooth"})} style={{ flex: 1, padding: "12px", border: "1px solid #e0e0e0", background: "#fff", fontFamily: "'Source Serif 4', serif", fontSize: 13, cursor: "pointer", borderRadius: 2 }}>← Previous</button>}
+          {idx < headlines.length - 1
+            ? <button onClick={() => setIdx(idx + 1)} style={{ flex: 1, padding: "12px", background: "#121212", color: "#fff", border: "none", fontFamily: "'Source Serif 4', serif", fontSize: 13, cursor: "pointer", borderRadius: 2 }}>Next headline →</button>
+            : <button onClick={onClose} style={{ flex: 1, padding: "12px", background: "#121212", color: "#fff", border: "none", fontFamily: "'Source Serif 4', serif", fontSize: 13, cursor: "pointer", borderRadius: 2 }}>Done</button>
+          }
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [loading,  setLoading]  = useState(true);
   const [daily,    setDaily]    = useState([]);
-  const [phase,    setPhase]    = useState("intro");
-  const [idx,      setIdx]      = useState(0);
+  const today0 = getTodayString();
+  const savedDate = getStorage("hl_today_date");
+  const validSave = savedDate === today0;
+  const [countdown, setCountdown] = useState('');
+  useEffect(() => {
+    function calc() {
+      const now = new Date();
+      const midnight = new Date();
+      midnight.setUTCHours(24, 0, 0, 0);
+      const diff = midnight - now;
+      const h = Math.floor(diff / 3600000);
+      const m = Math.floor((diff % 3600000) / 60000);
+      const s = Math.floor((diff % 60000) / 1000);
+      return h + 'h ' + String(m).padStart(2,'0') + 'm ' + String(s).padStart(2,'0') + 's';
+    }
+    setCountdown(calc());
+    const t = setInterval(() => setCountdown(calc()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const [phase,    setPhase]    = useState(validSave ? (getStorage("hl_phase") || "intro") : "intro");
+  const [idx,      setIdx]      = useState(validSave ? (getStorage("hl_idx") || 0) : 0);
   const [year,     setYear]     = useState(1970);
   const [locked,   setLocked]   = useState(false);
-  const [scores,   setScores]   = useState([]);
-  const [guesses,  setGuesses]  = useState([]);
+  const [scores,   setScores]   = useState(validSave ? (getStorage("hl_scores") || []) : []);
+  const [guesses,  setGuesses]  = useState(validSave ? (getStorage("hl_guesses") || []) : []);
   const [visible,  setVisible]  = useState(false);
   const [copied,   setCopied]   = useState(false);
+  const [showReview, setShowReview] = useState(false);
+  const [leaderboard, setLeaderboard] = useState(null);
+
+  // Save game state on every change
+  useEffect(() => {
+    if (phase !== "intro") {
+      setStorage("hl_phase", phase);
+      setStorage("hl_scores", scores);
+      setStorage("hl_guesses", guesses);
+      setStorage("hl_idx", idx);
+    }
+  }, [phase, scores, guesses, idx]);
+
   const [aiStatus, setAiStatus] = useState("");
 
   // Load today's headlines on mount
@@ -316,6 +494,17 @@ export default function App() {
     }
     load();
   }, []);
+
+  // Fetch leaderboard if returning to completed game
+  useEffect(() => {
+    if (phase === 'done' && !leaderboard) {
+      const uuid = getPlayerUUID();
+      fetch(`/api/leaderboard?uuid=${uuid}`)
+        .then(r => r.json())
+        .then(data => setLeaderboard(data))
+        .catch(() => {});
+    }
+  }, [phase]);
 
   useEffect(() => {
     if (locked) setTimeout(() => setVisible(true), 100);
@@ -340,18 +529,39 @@ export default function App() {
   }
 
   function advance() {
-    if (idx + 1 >= daily.length) setPhase("done");
-    else { setIdx(i => i + 1); setYear(1970); setLocked(false); setVisible(false); }
+    if (idx + 1 >= daily.length) {
+      setPhase("done"); window.scrollTo({top: 0, behavior: "smooth"});
+      const finalTotal = [...scores, calcScore(year, daily[idx].year)].reduce((a,b) => a+b, 0);
+      fetch('/api/track-completion', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ score: finalTotal, date: getTodayString() })
+      }).catch(() => {});
+
+      // Submit to leaderboard, then fetch results
+      const uuid = getPlayerUUID();
+      fetch('/api/leaderboard', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ uuid, score: finalTotal })
+      })
+        .then(() => fetch(`/api/leaderboard?uuid=${uuid}`))
+        .then(r => r.json())
+        .then(data => setLeaderboard(data))
+        .catch(() => {});
+    }
+    else { setIdx(i => i + 1) || window.scrollTo({top: 0, behavior: "smooth"}); setYear(1970); setLocked(false); setVisible(false); }
   }
 
   function handleShare() {
     const lines = daily.map((h, i) => {
-      const d = Math.abs(guesses[i] - h.year);
-      const dot = d === 0 ? "🟩" : d <= 3 ? "🟩" : d <= 10 ? "🟨" : "🟥";
-      const label = d === 0 ? "✓" : `${guesses[i] > h.year ? "+" : ""}${guesses[i] - h.year}yr`;
-      return `${dot}  ${h.year}  ${label}`;
+      const diff = guesses[i] - h.year;
+      const d = Math.abs(diff);
+      const dot = d <= 3 ? "🟩" : d <= 10 ? "🟨" : "🟥";
+      const label = d === 0 ? "✓" : `${diff > 0 ? "+" : ""}${diff}yr`;
+      return `${dot}  ${label}`;
     });
-    const card = [`📰 HEADLINES — ${TODAY_SHORT}`, "", ...lines, "", `${total.toLocaleString()} / ${max.toLocaleString()}  ·  ${getVerdict(Math.round(total / daily.length))}`, "headlines.games"].join("\n");
+    const card = [`📰 HEADLINES — ${TODAY_SHORT}`, "", ...lines, "", `${total.toLocaleString()} / ${max.toLocaleString()}  ·  ${getVerdict(Math.round(total / daily.length))}`, "www.headlines.games"].join("\n");
     navigator.clipboard?.writeText(card);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
@@ -409,11 +619,11 @@ export default function App() {
       </div>
       <div className="in" style={{ ...inner, paddingTop: 40 }}>
         {[
-          { n: "1", t: "Read the headline",  d: "Five real headlines from the world's great newspapers — a different set every day. Dates and bylines removed." },
-          { n: "2", t: "Guess the year",     d: "Drag the slider to your best estimate. Up to 1,000 points per headline — the closer you are, the more you score." },
-          { n: "3", t: "Share your result",  d: "Your score card shows exactly how close you were. Paste it anywhere — the years tell the story." },
+          { n: "1", t: "Read the headline",  d: "Five real headlines from history's greatest newspapers. Dates and bylines removed — just the words." },
+        { n: "2", t: "Guess the year",      d: "Drag the slider to your best estimate. Up to 1,000 points per headline — the closer you are, the more you score." },
+        { n: "3", t: "New every day",       d: "A fresh set of five headlines every day at midnight. Everyone plays the same edition." },
         ].map((s, i) => (
-          <div key={i} style={{ display: "flex", gap: 16, marginBottom: 26 }}>
+          <div key={i} style={{ display: "flex", gap: 12, marginBottom: 24, alignItems: "flex-start" }}>
             <div style={{ width: 30, height: 30, borderRadius: "50%", background: "#121212", color: "#fff", fontFamily: "'Playfair Display', serif", fontWeight: 900, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{s.n}</div>
             <div>
               <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 16, fontWeight: 700, color: "#121212", marginBottom: 4 }}>{s.t}</div>
@@ -423,7 +633,7 @@ export default function App() {
         ))}
         <div style={{ borderTop: "1px solid #e0e0e0", margin: "8px 0 30px" }} />
         <button className="btn" onClick={() => setPhase("play")}>Play today's edition →</button>
-        <div style={{ textAlign: "center", marginTop: 16, fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#bbb", fontStyle: "italic" }}>{TODAY_LONG} · New headlines every day at midnight</div>
+        <div style={{ textAlign: "center", marginTop: 16, fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#bbb", fontStyle: "italic" }}>{TODAY_LONG} · New headlines in {countdown}</div>
       </div>
     </div>
   );
@@ -524,6 +734,51 @@ export default function App() {
         <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".16em", textTransform: "uppercase", color: "#aaa", marginBottom: 14, textAlign: "center" }}>Your score card</div>
         <ShareCard headlines={daily} guesses={guesses} scores={scores} />
 
+        {leaderboard && leaderboard.totalPlayers > 0 && (
+          <div style={{ borderTop: "1px solid #e0e0e0", marginTop: 20, paddingTop: 20, marginBottom: 4 }}>
+            {leaderboard.percentile !== undefined && (
+              <div style={{ textAlign: "center", marginBottom: 20 }}>
+                <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 8 }}>Today's leaderboard</div>
+                <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 32, fontWeight: 900, color: "#121212", lineHeight: 1 }}>
+                  {leaderboard.totalPlayers > 1
+                    ? `Better than ${leaderboard.percentile}%`
+                    : "First player today!"}
+                </div>
+                <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#888", fontStyle: "italic", marginTop: 4 }}>
+                  {leaderboard.totalPlayers > 1
+                    ? `#${leaderboard.rank} of ${leaderboard.totalPlayers} players today`
+                    : "Check back later to see how you compare"}
+                </div>
+              </div>
+            )}
+            {leaderboard.top10?.length > 0 && (
+              <div>
+                <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 10 }}>Top 10</div>
+                {leaderboard.top10.map((entry, i) => {
+                  const isPlayer = leaderboard.playerScore === entry.score && leaderboard.rank === entry.rank;
+                  return (
+                    <div key={i} style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      padding: "8px 10px", background: isPlayer ? "#f5f5f0" : "transparent",
+                      borderRadius: 2, marginBottom: 2,
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 14, fontWeight: 900, color: i < 3 ? "#b8860b" : "#888", width: 22 }}>
+                          {entry.rank}
+                        </div>
+                        {isPlayer && <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#1a7c3a", fontStyle: "italic" }}>You</div>}
+                      </div>
+                      <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 16, fontWeight: 900, color: "#121212" }}>
+                        {entry.score.toLocaleString()}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 10 }}>
           <button className="btn-green" onClick={handleShare}>
             {copied ? "✓  Copied — paste anywhere!" : "📋  Copy & share your score"}
@@ -536,7 +791,10 @@ export default function App() {
           <button className="btn-ghost" onClick={reset}>Play again</button>
         </div>
 
+        {showReview && <ReviewScreen headlines={daily} guesses={guesses} scores={scores} onClose={() => setShowReview(false)} />}
+
         <div style={{ borderTop: "1px solid #e0e0e0", marginTop: 30, paddingTop: 20 }}>
+          <button onClick={() => setShowReview(true) || window.scrollTo({top: 0, behavior: "smooth"})} style={{ width: "100%", padding: "12px", border: "1px solid #e0e0e0", background: "#fff", fontFamily: "'Source Serif 4', serif", fontSize: 13, cursor: "pointer", borderRadius: 2, marginBottom: 20, color: "#121212" }}>📖 Review today's headlines</button>
           <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 16 }}>Headline by headline</div>
           {daily.map((h, i) => (
             <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderBottom: "1px solid #f5f5f5", gap: 14 }}>
@@ -556,7 +814,7 @@ export default function App() {
         </div>
 
         <div style={{ textAlign: "center", marginTop: 28, fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#ccc", fontStyle: "italic" }}>
-          New headlines tomorrow · headlines.games
+          New headlines in {countdown} · www.headlines.games
         </div>
       </div>
     </div>

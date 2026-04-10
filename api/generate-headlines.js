@@ -9,6 +9,7 @@ const REDIS_TOKEN = process.env.KV_REST_API_TOKEN;
 
 const RECYCLE_DAYS = 540; // 18 months
 const YEAR_AVOID_DAYS = 30;
+const CATEGORIES = ['Sport', 'Pop Culture', 'Politics/World Events', 'Science/Tech', 'Crime/Scandal/Disaster'];
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -48,9 +49,16 @@ export default async function handler(req, res) {
   const activeEvents = usedEvents.filter(
     (e) => typeof e.addedAt === 'number' && e.addedAt >= RECYCLE_CUTOFF
   );
-  const blockedDescriptions = activeEvents
-    .map((e) => e.eventDescription)
-    .filter(Boolean);
+
+  // Build per-category blocked lists
+  const blockedByCategory = {};
+  for (const cat of CATEGORIES) blockedByCategory[cat] = [];
+  for (const e of activeEvents) {
+    const cat = e.category || 'Uncategorized';
+    if (!blockedByCategory[cat]) blockedByCategory[cat] = [];
+    if (e.eventDescription) blockedByCategory[cat].push(e.eventDescription);
+  }
+
   const recentYears = [
     ...new Set(
       activeEvents
@@ -63,35 +71,54 @@ export default async function handler(req, res) {
     totalStored: usedEvents.length,
     activeInWindow: activeEvents.length,
     recentYearsCount: recentYears.length,
+    blockedPerCategory: Object.fromEntries(
+      Object.entries(blockedByCategory).map(([k, v]) => [k, v.length])
+    ),
   });
 
   // ── 4. Build prompt ─────────────────────────────────────────────────────
-  const blockedList =
-    blockedDescriptions.length > 0
-      ? blockedDescriptions.map((d) => `- ${d}`).join('\n')
-      : '(none yet)';
+  const blockedSection = CATEGORIES.map((cat) => {
+    const items = blockedByCategory[cat] || [];
+    const list = items.length > 0 ? items.map((d) => `  - ${d}`).join('\n') : '  (none yet)';
+    return `${cat}:\n${list}`;
+  }).join('\n\n');
+
+  // Include uncategorized legacy entries
+  const uncategorized = blockedByCategory['Uncategorized'] || [];
+  const uncatSection = uncategorized.length > 0
+    ? `\n\nUncategorized (legacy):\n${uncategorized.map((d) => `  - ${d}`).join('\n')}`
+    : '';
 
   const yearsLine = recentYears.length
     ? `\nAVOID these years (used in the last ${YEAR_AVOID_DAYS} days): ${recentYears.join(', ')}\n`
     : '';
 
-  const prompt = `You are creating headlines for a daily newspaper year-guessing game.
+  const prompt = `You are creating headlines for a daily newspaper year-guessing game — think pub quiz meets front page.
 
 Generate exactly 5 real historical newspaper headlines. Each headline must be dramatic, specific, factually accurate, and clearly tied to a single year. Players will see the headline and try to guess the year.
 
-REQUIREMENTS:
-- All 5 headlines should be from different years and ideally different decades
-- Most should fall between 1900 and 2010 (the historical sweet spot for this game)
-- Occasionally include something from 2011–2024 for freshness — this is allowed but not required, use your judgment
-- ALL CAPS, written like a real front-page headline
-- Cover diverse topics (science, disasters, sport, politics, culture, exploration, war, technology)
-- Cover diverse regions (not only USA/UK)
-- ONLY include events you have factual knowledge of. Never invent or guess at events. If unsure, pick something else.
+CATEGORIES — you MUST include exactly one headline from each of these five categories:
+1. Sport
+2. Pop Culture (music, film, TV, celebrity, fashion, art)
+3. Politics/World Events (elections, treaties, wars, diplomacy, revolutions)
+4. Science/Tech (discoveries, inventions, space, medicine, computing)
+5. Crime/Scandal/Disaster (natural disasters, crashes, crimes, scandals, industrial accidents)
 
-CRITICAL — DO NOT use any of the following events. Avoid the same underlying event even if you reword the headline. If "Moon landing" is in the list, do not generate ANY headline about Apollo 11, Neil Armstrong, lunar surface, etc.:
-${blockedList}
+REQUIREMENTS:
+- One headline per category, in any order
+- All 5 from different years, ideally different decades
+- Most should fall between 1900 and 2010 (the historical sweet spot)
+- Occasionally include something from 2011–2024 for freshness — allowed but not required
+- ALL CAPS, written like a real front-page headline
+- Choose events that feel familiar to UK, US, and Australian audiences — but not exclusively from those countries
+- ONLY include events you have factual knowledge of. Never invent or guess at events.
+
+CRITICAL — DO NOT use any of the following events (organized by category). Avoid the same underlying event even if you reword the headline:
+
+${blockedSection}${uncatSection}
 ${yearsLine}
 Return ONLY a JSON array of 5 objects. Each object MUST have these fields:
+- "category": one of "Sport", "Pop Culture", "Politics/World Events", "Science/Tech", "Crime/Scandal/Disaster"
 - "eventKey": short unique slug like "moon-landing-1969" or "bhopal-disaster-1984"
 - "eventDescription": short plain-English event name like "Moon landing" or "Bhopal gas disaster"
 - "text": the headline (ALL CAPS, dramatic, newspaper style)
@@ -158,12 +185,14 @@ Return ONLY the JSON array. No markdown fences, no preamble, no explanation.`;
     publication: h.publication,
     pubColor: h.pubColor || '#1a1a1a',
     context: h.context,
+    category: h.category || CATEGORIES[i] || 'Uncategorized',
   }));
 
-  const newEntries = headlines.map((h) => ({
+  const newEntries = headlines.map((h, i) => ({
     eventKey: h.eventKey || slugify(h.text).slice(0, 60),
     eventDescription: h.eventDescription || h.text,
     year: h.year,
+    category: h.category || CATEGORIES[i] || 'Uncategorized',
     addedAt: NOW_MS,
   }));
   const updatedEvents = [...usedEvents, ...newEntries];
@@ -217,6 +246,28 @@ async function kvSet(key, value, log) {
   } catch (e) {
     if (log) log(`kv set ${key} threw`, { error: e.message });
     return false;
+  }
+}
+
+// Exported for reuse by other API routes
+export { kvGet, kvSet, REDIS_URL, REDIS_TOKEN };
+
+export async function kvPipeline(commands, log) {
+  try {
+    const r = await fetch(`${REDIS_URL}/pipeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${REDIS_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commands),
+    });
+    if (log) log('kv pipeline', { status: r.status, commands: commands.length });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    if (log) log('kv pipeline threw', { error: e.message });
+    return null;
   }
 }
 
