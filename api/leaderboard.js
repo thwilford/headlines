@@ -11,14 +11,17 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Redis env vars missing' });
   }
 
-  const today = new Date().toISOString().split('T')[0];
-  const lbKey = `lb:${today}`;
+  const serverDate = new Date().toISOString().split('T')[0];
 
   if (req.method === 'POST') {
-    return handleSubmit(req, res, lbKey);
+    const clientDate = req.body?.date;
+    const date = isValidDate(clientDate) ? clientDate : serverDate;
+    return handleSubmit(req, res, `lb:${date}`);
   }
   if (req.method === 'GET') {
-    return handleGet(req, res, lbKey);
+    const clientDate = req.query?.date;
+    const date = isValidDate(clientDate) ? clientDate : serverDate;
+    return handleGet(req, res, `lb:${date}`);
   }
   return res.status(405).json({ error: 'Method not allowed' });
 }
@@ -108,4 +111,8 @@ async function pipeline(commands) {
   } catch {
     return null;
   }
+}
+
+function isValidDate(s) {
+  return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s));
 }

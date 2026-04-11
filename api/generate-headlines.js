@@ -28,7 +28,9 @@ export default async function handler(req, res) {
     return respond(500, { error: 'Redis env vars missing' });
   }
 
-  const today = new Date().toISOString().split('T')[0];
+  // Use client-sent date (local midnight, like Wordle) or fall back to server UTC
+  const clientDate = req.body?.date;
+  const today = isValidDate(clientDate) ? clientDate : new Date().toISOString().split('T')[0];
   const cacheKey = `headlines:${today}`;
   const NOW_MS = Date.now();
   const RECYCLE_CUTOFF = NOW_MS - RECYCLE_DAYS * 86400 * 1000;
@@ -103,6 +105,15 @@ CATEGORIES — you MUST include exactly one headline from each of these five cat
 3. Politics/World Events (elections, treaties, wars, diplomacy, revolutions)
 4. Science/Tech (discoveries, inventions, space, medicine, computing)
 5. Crime/Scandal/Disaster (natural disasters, crashes, crimes, scandals, industrial accidents)
+
+DIFFICULTY — THIS IS CRITICAL:
+This game must feel fun and achievable, like a pub quiz or Wordle — NOT like a history exam.
+- Choose events that most adults would recognise from pop culture, movies, songs, memes, or casual conversation
+- The headline should contain enough context clues that even someone who doesn't know the exact year can make a reasonable guess (within 10-15 years)
+- GOOD examples: Titanic sinking, Moon landing, Beatles, Princess Diana, Berlin Wall, 9/11, iPhone launch, Usain Bolt, Chernobyl, World Cup moments, Olympic moments, major movie releases
+- BAD examples: Obscure treaties, minor political events, niche scientific papers, regional disasters unknown outside one country
+- Think "things your parents or friends would know at a dinner party" — not "things a history professor would quiz you on"
+- The headline text itself should include helpful clues like names, places, or cultural references that anchor it to an era
 
 REQUIREMENTS:
 - One headline per category, in any order
@@ -269,6 +280,10 @@ export async function kvPipeline(commands, log) {
     if (log) log('kv pipeline threw', { error: e.message });
     return null;
   }
+}
+
+function isValidDate(s) {
+  return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s));
 }
 
 function slugify(s) {

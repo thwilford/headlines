@@ -75,7 +75,8 @@ function setStorage(key, value) {
 }
 
 function getTodayString() {
-  return new Date().toISOString().split("T")[0];
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 // ── AI HEADLINE GENERATOR ────────────────────────────────────────────────────
@@ -177,7 +178,7 @@ async function getDailyHeadlines() {
     const response = await fetch('/api/generate-headlines', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ usedTexts }),
+      body: JSON.stringify({ usedTexts, date: today }),
     });
     const data = await response.json();
     const todaysHeadlines = (data.headlines || []).slice(0, 5).map(h => ({...h, context: h.context || h.explanation || ""}));
@@ -442,7 +443,7 @@ export default function App() {
     function calc() {
       const now = new Date();
       const midnight = new Date();
-      midnight.setUTCHours(24, 0, 0, 0);
+      midnight.setHours(24, 0, 0, 0);
       const diff = midnight - now;
       const h = Math.floor(diff / 3600000);
       const m = Math.floor((diff % 3600000) / 60000);
@@ -461,13 +462,15 @@ export default function App() {
   const [guesses,  setGuesses]  = useState(validSave ? (getStorage("hl_guesses") || []) : []);
   const [visible,  setVisible]  = useState(false);
   const [copied,   setCopied]   = useState(false);
+  const [activeSession, setActiveSession] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [leaderboard, setLeaderboard] = useState(null);
 
   // Save game state on every change
   useEffect(() => {
     if (phase !== "intro") {
-      setStorage("hl_phase", phase);
+      // Store "done" for both "results" and "done" so returning users see the "already played" screen
+      setStorage("hl_phase", phase === "results" ? "done" : phase);
       setStorage("hl_scores", scores);
       setStorage("hl_guesses", guesses);
       setStorage("hl_idx", idx);
@@ -497,9 +500,9 @@ export default function App() {
 
   // Fetch leaderboard if returning to completed game
   useEffect(() => {
-    if (phase === 'done' && !leaderboard) {
+    if ((phase === 'done' || phase === 'results') && !leaderboard) {
       const uuid = getPlayerUUID();
-      fetch(`/api/leaderboard?uuid=${uuid}`)
+      fetch(`/api/leaderboard?uuid=${uuid}&date=${getTodayString()}`)
         .then(r => r.json())
         .then(data => setLeaderboard(data))
         .catch(() => {});
@@ -530,7 +533,7 @@ export default function App() {
 
   function advance() {
     if (idx + 1 >= daily.length) {
-      setPhase("done"); window.scrollTo({top: 0, behavior: "smooth"});
+      setPhase("results"); window.scrollTo({top: 0, behavior: "smooth"});
       const finalTotal = [...scores, calcScore(year, daily[idx].year)].reduce((a,b) => a+b, 0);
       fetch('/api/track-completion', {
         method: 'POST',
@@ -540,12 +543,13 @@ export default function App() {
 
       // Submit to leaderboard, then fetch results
       const uuid = getPlayerUUID();
+      const playerDate = getTodayString();
       fetch('/api/leaderboard', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ uuid, score: finalTotal })
+        body: JSON.stringify({ uuid, score: finalTotal, date: playerDate })
       })
-        .then(() => fetch(`/api/leaderboard?uuid=${uuid}`))
+        .then(() => fetch(`/api/leaderboard?uuid=${uuid}&date=${playerDate}`))
         .then(r => r.json())
         .then(data => setLeaderboard(data))
         .catch(() => {});
@@ -554,14 +558,14 @@ export default function App() {
   }
 
   function handleShare() {
-    const lines = daily.map((h, i) => {
+    const squares = daily.map((h, i) => {
       const diff = guesses[i] - h.year;
       const d = Math.abs(diff);
       const dot = d <= 3 ? "🟩" : d <= 10 ? "🟨" : "🟥";
-      const label = d === 0 ? "✓" : `${diff > 0 ? "+" : ""}${diff}yr`;
-      return `${dot}  ${label}`;
-    });
-    const card = [`📰 HEADLINES — ${TODAY_SHORT}`, "", ...lines, "", `${total.toLocaleString()} / ${max.toLocaleString()}  ·  ${getVerdict(Math.round(total / daily.length))}`, "www.headlines.games"].join("\n");
+      const label = d === 0 ? "✓" : `${diff > 0 ? "+" : ""}${diff}`;
+      return `${dot}${label}`;
+    }).join("  ");
+    const card = `📰 HEADLINES · ${TODAY_SHORT}\n${squares}\n${total.toLocaleString()} / ${max.toLocaleString()} · ${getVerdict(Math.round(total / daily.length))} · www.headlines.games`;
     navigator.clipboard?.writeText(card);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
@@ -609,7 +613,50 @@ export default function App() {
     </div>
   );
 
-  // ── INTRO ──────────────────────────────────────────────────────────────────
+  // ── ALREADY PLAYED (done today, returning to app) ──────────────────────────
+  if (phase === "done" && validSave && scores.length >= daily.length && daily.length > 0) {
+    const avg = Math.round(total / daily.length);
+    return (
+      <div style={wrap}>
+        <style>{css}</style>
+        <div style={{ ...inner, borderBottom: "1px solid #e0e0e0", padding: "24px 0 18px", textAlign: "center" }}>
+          <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(42px,11vw,58px)", fontWeight: 900, color: "#121212", letterSpacing: "-.02em", lineHeight: 1 }}>HEADLINES</div>
+        </div>
+        <div className="in" style={{ ...inner, paddingTop: 40, textAlign: "center" }}>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 15, color: "#888", fontStyle: "italic", marginBottom: 8 }}>Hey Headliner,</div>
+          <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(20px,5vw,26px)", fontWeight: 900, color: "#121212", lineHeight: 1.3, marginBottom: 8 }}>You've already played today's edition</div>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 14, color: "#888", fontStyle: "italic", marginBottom: 30 }}>Come back at midnight for fresh headlines</div>
+
+          <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(48px,14vw,72px)", fontWeight: 900, color: "#121212", lineHeight: 1, marginBottom: 4 }}>{total.toLocaleString()}</div>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#aaa", fontStyle: "italic" }}>out of {max.toLocaleString()} · "{getVerdict(avg)}"</div>
+
+          <div style={{ borderTop: "1px solid #e0e0e0", margin: "30px 0" }} />
+          <button className="btn" onClick={() => { setPhase("results"); window.scrollTo({top: 0, behavior: "smooth"}); }}>See your results →</button>
+          <div style={{ textAlign: "center", marginTop: 16, fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#bbb", fontStyle: "italic" }}>New headlines in {countdown}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── CONTINUE (started but not finished — only on return, not during active play) ──
+  if (phase === "play" && validSave && scores.length > 0 && scores.length < daily.length && !activeSession) return (
+    <div style={wrap}>
+      <style>{css}</style>
+      <div style={{ ...inner, borderBottom: "1px solid #e0e0e0", padding: "24px 0 18px", textAlign: "center" }}>
+        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(42px,11vw,58px)", fontWeight: 900, color: "#121212", letterSpacing: "-.02em", lineHeight: 1 }}>HEADLINES</div>
+      </div>
+      <div className="in" style={{ ...inner, paddingTop: 40, textAlign: "center" }}>
+        <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 15, color: "#888", fontStyle: "italic", marginBottom: 8 }}>Welcome back, Headliner</div>
+        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(20px,5vw,26px)", fontWeight: 900, color: "#121212", lineHeight: 1.3, marginBottom: 8 }}>You've got headlines left to guess</div>
+        <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 14, color: "#888", marginBottom: 30 }}>{scores.length} of {daily.length} completed · {total.toLocaleString()} points so far</div>
+
+        <button className="btn" onClick={() => { setActiveSession(true); setLocked(false); setYear(1970); setVisible(false); window.scrollTo({top: 0, behavior: "smooth"}); }}>Continue playing →</button>
+        <div style={{ textAlign: "center", marginTop: 16, fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#bbb", fontStyle: "italic" }}>{TODAY_LONG} · New headlines in {countdown}</div>
+      </div>
+    </div>
+  );
+
+  // ── INTRO (haven't started today) ─────────────────────────────────────────
   if (phase === "intro") return (
     <div style={wrap}>
       <style>{css}</style>
@@ -632,7 +679,7 @@ export default function App() {
           </div>
         ))}
         <div style={{ borderTop: "1px solid #e0e0e0", margin: "8px 0 30px" }} />
-        <button className="btn" onClick={() => setPhase("play")}>Play today's edition →</button>
+        <button className="btn" onClick={() => { setActiveSession(true); setPhase("play"); }}>Play today's edition →</button>
         <div style={{ textAlign: "center", marginTop: 16, fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#bbb", fontStyle: "italic" }}>{TODAY_LONG} · New headlines in {countdown}</div>
       </div>
     </div>
@@ -788,13 +835,12 @@ export default function App() {
               Paste it into WhatsApp, iMessage, Twitter…
             </div>
           )}
-          <button className="btn-ghost" onClick={reset}>Play again</button>
         </div>
 
         {showReview && <ReviewScreen headlines={daily} guesses={guesses} scores={scores} onClose={() => setShowReview(false)} />}
 
         <div style={{ borderTop: "1px solid #e0e0e0", marginTop: 30, paddingTop: 20 }}>
-          <button onClick={() => setShowReview(true) || window.scrollTo({top: 0, behavior: "smooth"})} style={{ width: "100%", padding: "12px", border: "1px solid #e0e0e0", background: "#fff", fontFamily: "'Source Serif 4', serif", fontSize: 13, cursor: "pointer", borderRadius: 2, marginBottom: 20, color: "#121212" }}>📖 Review today's headlines</button>
+          <button onClick={() => setShowReview(true) || window.scrollTo({top: 0, behavior: "smooth"})} style={{ width: "100%", padding: "12px", border: "1px solid #e0e0e0", background: "#fff", fontFamily: "'Source Serif 4', serif", fontSize: 13, cursor: "pointer", borderRadius: 2, marginBottom: 20, color: "#121212" }}>How did you compare?</button>
           <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 16 }}>Headline by headline</div>
           {daily.map((h, i) => (
             <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderBottom: "1px solid #f5f5f5", gap: 14 }}>
