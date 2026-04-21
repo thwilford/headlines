@@ -341,6 +341,7 @@ function Timeline({ guessYear, actualYear }) {
 }
 
 function ReviewScreen({ headlines, guesses, scores, onClose }) {
+  const [view, setView] = useState("overview");
   const [idx, setIdx] = useState(0);
   const h = headlines[idx];
   const g = guesses[idx];
@@ -350,13 +351,89 @@ function ReviewScreen({ headlines, guesses, scores, onClose }) {
   const diffLabel = diff === 0 ? "Exact year — extraordinary." : diff === 1 ? "Just 1 year off." : diff <= 5 ? `${diff} years off — very close.` : diff <= 15 ? `${diff} years off.` : `${diff} years off — wide of the mark.`;
   const col = diff === 0 ? "#1a7c3a" : diff <= 5 ? "#2563a8" : "#b91c1c";
 
+  // Aggregated totals across all headlines
+  const totalScore = scores.reduce((a, b) => a + b, 0);
+  const maxScore = headlines.length * 1000;
+  const diffs = headlines.map((hh, i) => Math.abs(guesses[i] - hh.year));
+  const youWithin1 = diffs.filter(d => d === 0).length;
+  const youWithin5 = diffs.filter(d => d <= 5).length;
+  const youWithin10 = diffs.filter(d => d <= 10).length;
+  const allStats = headlines.map(hh => getSimulatedStats(hh.year, 0));
+  const avgWithin1 = Math.round(allStats.reduce((a, b) => a + b.within1, 0) / allStats.length);
+  const avgWithin5 = Math.round(allStats.reduce((a, b) => a + b.within5, 0) / allStats.length);
+  const avgWithin10 = Math.round(allStats.reduce((a, b) => a + b.within10, 0) / allStats.length);
+  const youPct1 = Math.round((youWithin1 / headlines.length) * 100);
+  const youPct5 = Math.round((youWithin5 / headlines.length) * 100);
+  const youPct10 = Math.round((youWithin10 / headlines.length) * 100);
+
+  if (view === "overview") {
+    const rows = [
+      { label: "Exact year", you: youPct1, avg: avgWithin1, youCount: youWithin1, color: "#1a7c3a" },
+      { label: "Within 5 years", you: youPct5, avg: avgWithin5, youCount: youWithin5, color: "#2563a8" },
+      { label: "Within 10 years", you: youPct10, avg: avgWithin10, youCount: youWithin10, color: "#888" },
+    ];
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "#fff", zIndex: 100, overflowY: "auto" }}>
+        <div style={{ maxWidth: 480, margin: "0 auto", padding: "0 20px 40px" }}>
+          {/* Header */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 0 14px", borderBottom: "1px solid #e0e0e0", marginBottom: 24 }}>
+            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 900, color: "#121212" }}>HOW YOU COMPARE</div>
+            <button onClick={onClose} style={{ background: "none", border: "none", fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#888", cursor: "pointer" }}>✕ Close</button>
+          </div>
+
+          {/* Total score */}
+          <div style={{ textAlign: "center", marginBottom: 28 }}>
+            <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 8 }}>Your total score</div>
+            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 56, fontWeight: 900, color: "#121212", lineHeight: 1 }}>{totalScore.toLocaleString()}</div>
+            <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#bbb", marginTop: 4 }}>/ {maxScore.toLocaleString()}</div>
+          </div>
+
+          {/* Overall comparison */}
+          <div style={{ borderTop: "1px solid #f0f0f0", paddingTop: 20, marginBottom: 24 }}>
+            <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 16 }}>Overall · you vs. all players</div>
+            {rows.map((row, i) => (
+              <div key={i} style={{ marginBottom: 18 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#444" }}>{row.label}</span>
+                  <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#888" }}>
+                    <strong style={{ color: row.color }}>{row.youCount}/{headlines.length}</strong> you · <strong>{row.avg}%</strong> avg
+                  </span>
+                </div>
+                <div style={{ position: "relative", height: 6, background: "#f0f0f0", borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
+                  <div style={{ position: "absolute", inset: 0, height: "100%", width: `${row.you}%`, background: row.color, borderRadius: 3 }} />
+                </div>
+                <div style={{ position: "relative", height: 6, background: "#f0f0f0", borderRadius: 3, overflow: "hidden" }}>
+                  <div style={{ position: "absolute", inset: 0, height: "100%", width: `${row.avg}%`, background: "#ccc", borderRadius: 3 }} />
+                </div>
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 16, marginTop: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ width: 10, height: 4, borderRadius: 2, background: "#444" }} />
+                <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#888" }}>You</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ width: 10, height: 4, borderRadius: 2, background: "#ccc" }} />
+                <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#888" }}>All players</span>
+              </div>
+            </div>
+          </div>
+
+          {/* CTA to per-headline breakdown */}
+          <button onClick={() => { setView("detail"); setIdx(0); window.scrollTo({top: 0, behavior: "smooth"}); }} style={{ width: "100%", padding: "14px", background: "#121212", color: "#fff", border: "none", fontFamily: "'Source Serif 4', serif", fontSize: 13, cursor: "pointer", borderRadius: 2 }}>Headline by headline →</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "#fff", zIndex: 100, overflowY: "auto" }}>
       <div style={{ maxWidth: 480, margin: "0 auto", padding: "0 20px 40px" }}>
         {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 0 14px", borderBottom: "1px solid #e0e0e0", marginBottom: 24 }}>
+          <button onClick={() => { setView("overview"); window.scrollTo({top: 0, behavior: "smooth"}); }} style={{ background: "none", border: "none", fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#888", cursor: "pointer", padding: 0 }}>← Overview</button>
           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 900, color: "#121212" }}>HEADLINE BY HEADLINE</div>
-          <button onClick={onClose} style={{ background: "none", border: "none", fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#888", cursor: "pointer" }}>✕ Close</button>
+          <button onClick={onClose} style={{ background: "none", border: "none", fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#888", cursor: "pointer" }}>✕</button>
         </div>
 
         {/* Dot nav */}
@@ -660,27 +737,30 @@ export default function App() {
   if (phase === "intro") return (
     <div style={wrap}>
       <style>{css}</style>
-      <div style={{ ...inner, borderBottom: "1px solid #e0e0e0", padding: "24px 0 18px", textAlign: "center" }}>
-        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(42px,11vw,58px)", fontWeight: 900, color: "#121212", letterSpacing: "-.02em", lineHeight: 1 }}>HEADLINES</div>
-        <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 13, fontStyle: "italic", color: "#888", marginTop: 10 }}>Name the year. Trust your history.</div>
+      <div style={{ ...inner, borderBottom: "1px solid #e0e0e0", padding: "16px 0 12px", textAlign: "center" }}>
+        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(36px,9vw,48px)", fontWeight: 900, color: "#121212", letterSpacing: "-.02em", lineHeight: 1 }}>HEADLINES</div>
+        <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 12, fontStyle: "italic", color: "#888", marginTop: 6 }}>Name the year. Trust your history.</div>
       </div>
-      <div className="in" style={{ ...inner, paddingTop: 40 }}>
+      <div style={{ textAlign: "center", padding: "16px 16px 0", width: "100%", maxWidth: 540 }}>
+        <img src="/hero.jpg" alt="HEADLINES — guess the year from real newspaper headlines" style={{ width: "clamp(220px, 55%, 360px)", borderRadius: 10, display: "block", margin: "0 auto" }} />
+      </div>
+      <div className="in" style={{ ...inner, paddingTop: 16 }}>
         {[
-          { n: "1", t: "Read the headline",  d: "Five real headlines from history's greatest newspapers. Dates and bylines removed — just the words." },
-        { n: "2", t: "Guess the year",      d: "Drag the slider to your best estimate. Up to 1,000 points per headline — the closer you are, the more you score." },
-        { n: "3", t: "New every day",       d: "A fresh set of five headlines every day at midnight. Everyone plays the same edition." },
+          { n: "1", t: "Read the headline",  d: "Five real headlines, no dates — just the words." },
+          { n: "2", t: "Guess the year",     d: "Drag the slider. Up to 1,000 points per headline." },
+          { n: "3", t: "New every day",      d: "Fresh headlines at midnight. Same edition for all." },
         ].map((s, i) => (
-          <div key={i} style={{ display: "flex", gap: 12, marginBottom: 24, alignItems: "flex-start" }}>
-            <div style={{ width: 30, height: 30, borderRadius: "50%", background: "#121212", color: "#fff", fontFamily: "'Playfair Display', serif", fontWeight: 900, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{s.n}</div>
-            <div>
-              <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 16, fontWeight: 700, color: "#121212", marginBottom: 4 }}>{s.t}</div>
-              <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#666", lineHeight: 1.65 }}>{s.d}</div>
+          <div key={i} style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "flex-start" }}>
+            <div style={{ width: 24, height: 24, borderRadius: "50%", background: "#121212", color: "#fff", fontFamily: "'Playfair Display', serif", fontWeight: 900, fontSize: 11, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 2 }}>{s.n}</div>
+            <div style={{ textAlign: "center", flex: 1 }}>
+              <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 17, fontWeight: 700, color: "#121212", lineHeight: 1.2 }}>{s.t}</div>
+              <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#888", lineHeight: 1.4, marginTop: 3 }}>{s.d}</div>
             </div>
           </div>
         ))}
-        <div style={{ borderTop: "1px solid #e0e0e0", margin: "8px 0 30px" }} />
+        <div style={{ borderTop: "1px solid #e0e0e0", margin: "4px 0 16px" }} />
         <button className="btn" onClick={() => { setActiveSession(true); setPhase("play"); }}>Play today's edition →</button>
-        <div style={{ textAlign: "center", marginTop: 16, fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#bbb", fontStyle: "italic" }}>{TODAY_LONG} · New headlines in {countdown}</div>
+        <div style={{ textAlign: "center", marginTop: 10, fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#bbb", fontStyle: "italic" }}>{TODAY_LONG} · New headlines in {countdown}</div>
       </div>
     </div>
   );
@@ -708,8 +788,12 @@ export default function App() {
 
         <div style={{ paddingTop: 28 }}>
           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(50px,13vw,70px)", fontWeight: 900, color: "#121212", letterSpacing: "-.025em", lineHeight: 1, marginBottom: 24 }}>{year}</div>
-          <input type="range" min={MIN} max={MAX} value={year} disabled={locked} style={{ "--p": pct }} onChange={e => setYear(Number(e.target.value))} />
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 9, fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#ccc" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button onClick={() => !locked && setYear(y => Math.max(MIN, y - 1))} disabled={locked} style={{ width: 36, height: 36, borderRadius: "50%", border: "1.5px solid #d0d0d0", background: "#fff", color: "#121212", fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 700, cursor: locked ? "default" : "pointer", opacity: locked ? 0.3 : 1, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>−</button>
+            <input type="range" min={MIN} max={MAX} value={year} disabled={locked} style={{ "--p": pct, flex: 1 }} onChange={e => setYear(Number(e.target.value))} />
+            <button onClick={() => !locked && setYear(y => Math.min(MAX, y + 1))} disabled={locked} style={{ width: 36, height: 36, borderRadius: "50%", border: "1.5px solid #d0d0d0", background: "#fff", color: "#121212", fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 700, cursor: locked ? "default" : "pointer", opacity: locked ? 0.3 : 1, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>+</button>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 9, fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#ccc", padding: "0 44px" }}>
             <span>1900</span><span>2026</span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3, marginBottom: 30 }}>
@@ -774,57 +858,13 @@ export default function App() {
           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(64px,17vw,92px)", fontWeight: 900, color: "#121212", lineHeight: 1, letterSpacing: "-.03em" }}>{total.toLocaleString()}</div>
           <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#aaa", fontStyle: "italic", marginTop: 5 }}>out of {max.toLocaleString()}</div>
           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 20, fontStyle: "italic", color: "#b91c1c", marginTop: 12 }}>"{getVerdict(avg)}"</div>
+          <div style={{ display: "inline-block", border: "1px solid #ccc", color: "#555", fontFamily: "'Source Serif 4', serif", fontSize: 12, fontStyle: "italic", padding: "5px 14px", borderRadius: 16, marginTop: 16 }}>New headlines in {countdown}</div>
         </div>
 
         <div style={{ borderTop: "1px solid #e0e0e0", marginBottom: 24 }} />
 
         <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".16em", textTransform: "uppercase", color: "#aaa", marginBottom: 14, textAlign: "center" }}>Your score card</div>
         <ShareCard headlines={daily} guesses={guesses} scores={scores} />
-
-        {leaderboard && leaderboard.totalPlayers > 0 && (
-          <div style={{ borderTop: "1px solid #e0e0e0", marginTop: 20, paddingTop: 20, marginBottom: 4 }}>
-            {leaderboard.percentile !== undefined && (
-              <div style={{ textAlign: "center", marginBottom: 20 }}>
-                <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 8 }}>Today's leaderboard</div>
-                <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 32, fontWeight: 900, color: "#121212", lineHeight: 1 }}>
-                  {leaderboard.totalPlayers > 1
-                    ? `Better than ${leaderboard.percentile}%`
-                    : "First player today!"}
-                </div>
-                <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 13, color: "#888", fontStyle: "italic", marginTop: 4 }}>
-                  {leaderboard.totalPlayers > 1
-                    ? `#${leaderboard.rank} of ${leaderboard.totalPlayers} players today`
-                    : "Check back later to see how you compare"}
-                </div>
-              </div>
-            )}
-            {leaderboard.top10?.length > 0 && (
-              <div>
-                <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#aaa", marginBottom: 10 }}>Top 10</div>
-                {leaderboard.top10.map((entry, i) => {
-                  const isPlayer = leaderboard.playerScore === entry.score && leaderboard.rank === entry.rank;
-                  return (
-                    <div key={i} style={{
-                      display: "flex", justifyContent: "space-between", alignItems: "center",
-                      padding: "8px 10px", background: isPlayer ? "#f5f5f0" : "transparent",
-                      borderRadius: 2, marginBottom: 2,
-                    }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 14, fontWeight: 900, color: i < 3 ? "#b8860b" : "#888", width: 22 }}>
-                          {entry.rank}
-                        </div>
-                        {isPlayer && <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#1a7c3a", fontStyle: "italic" }}>You</div>}
-                      </div>
-                      <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 16, fontWeight: 900, color: "#121212" }}>
-                        {entry.score.toLocaleString()}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
 
         <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 10 }}>
           <button className="btn-green" onClick={handleShare}>

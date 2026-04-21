@@ -1,0 +1,22 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron-headlines",
+      "schedule": "0 0 * * *"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/admin",
+      "destination": "/index.html"
+    }
+  ],
+  "functions": {
+    "api/generate-headlines.js": {
+      "maxDuration": 60
+    },
+    "api/cron-headlines.js": {
+      "maxDuration": 60
+    }
+  }
+}

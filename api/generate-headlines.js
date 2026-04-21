@@ -7,8 +7,10 @@
 const REDIS_URL = process.env.KV_REST_API_URL;
 const REDIS_TOKEN = process.env.KV_REST_API_TOKEN;
 
-const RECYCLE_DAYS = 540; // 18 months
+const RECYCLE_DAYS = 540; // 18 months — soft dedup window
+const HARD_BLOCK_DAYS = 365; // 12 months — NEVER repeat a topic shown in this window
 const YEAR_AVOID_DAYS = 30;
+const MAX_ATTEMPTS = 3;
 const CATEGORIES = ['Sport', 'Pop Culture', 'Politics/World Events', 'Science/Tech', 'Crime/Scandal/Disaster'];
 
 export default async function handler(req, res) {
@@ -34,6 +36,7 @@ export default async function handler(req, res) {
   const cacheKey = `headlines:${today}`;
   const NOW_MS = Date.now();
   const RECYCLE_CUTOFF = NOW_MS - RECYCLE_DAYS * 86400 * 1000;
+  const HARD_BLOCK_CUTOFF = NOW_MS - HARD_BLOCK_DAYS * 86400 * 1000;
   const YEAR_AVOID_CUTOFF = NOW_MS - YEAR_AVOID_DAYS * 86400 * 1000;
 
   // ── 1. Cache check ──────────────────────────────────────────────────────
@@ -47,19 +50,35 @@ export default async function handler(req, res) {
   let usedEvents = (await kvGet('used_events', log)) || [];
   if (!Array.isArray(usedEvents)) usedEvents = [];
 
-  // ── 3. Filter to active recycling window ────────────────────────────────
+  // ── 3. Filter to active windows ─────────────────────────────────────────
   const activeEvents = usedEvents.filter(
     (e) => typeof e.addedAt === 'number' && e.addedAt >= RECYCLE_CUTOFF
   );
+  const hardBlockEvents = activeEvents.filter((e) => e.addedAt >= HARD_BLOCK_CUTOFF);
+  const softBlockEvents = activeEvents.filter((e) => e.addedAt < HARD_BLOCK_CUTOFF);
 
-  // Build per-category blocked lists
-  const blockedByCategory = {};
-  for (const cat of CATEGORIES) blockedByCategory[cat] = [];
-  for (const e of activeEvents) {
-    const cat = e.category || 'Uncategorized';
-    if (!blockedByCategory[cat]) blockedByCategory[cat] = [];
-    if (e.eventDescription) blockedByCategory[cat].push(e.eventDescription);
+  // Precompute fingerprints once (used for prompt + post-gen validation)
+  const hardBlockFingerprints = hardBlockEvents.map((e) => ({
+    event: e,
+    keywords: fingerprint(`${e.eventDescription || ''} ${e.eventKey || ''}`),
+  }));
+  const softBlockFingerprints = softBlockEvents.map((e) => ({
+    event: e,
+    keywords: fingerprint(`${e.eventDescription || ''} ${e.eventKey || ''}`),
+  }));
+
+  // Collect distinctive tokens from last-365-day events (≥5 chars, proper-noun-like)
+  const hardBlockTokens = new Set();
+  for (const { keywords } of hardBlockFingerprints) {
+    for (const tok of keywords) if (tok.length >= 5) hardBlockTokens.add(tok);
   }
+
+  const hardBlockDescriptions = hardBlockEvents
+    .filter((e) => e.eventDescription)
+    .map((e) => e.eventDescription);
+  const softBlockDescriptions = softBlockEvents
+    .filter((e) => e.eventDescription)
+    .map((e) => e.eventDescription);
 
   const recentYears = [
     ...new Set(
@@ -72,30 +91,39 @@ export default async function handler(req, res) {
   log('dedup state', {
     totalStored: usedEvents.length,
     activeInWindow: activeEvents.length,
+    hardBlockedEvents: hardBlockEvents.length,
+    softBlockedEvents: softBlockEvents.length,
+    hardBlockedTokens: hardBlockTokens.size,
     recentYearsCount: recentYears.length,
-    blockedPerCategory: Object.fromEntries(
-      Object.entries(blockedByCategory).map(([k, v]) => [k, v.length])
-    ),
   });
 
   // ── 4. Build prompt ─────────────────────────────────────────────────────
-  const blockedSection = CATEGORIES.map((cat) => {
-    const items = blockedByCategory[cat] || [];
-    const list = items.length > 0 ? items.map((d) => `  - ${d}`).join('\n') : '  (none yet)';
-    return `${cat}:\n${list}`;
-  }).join('\n\n');
-
-  // Include uncategorized legacy entries
-  const uncategorized = blockedByCategory['Uncategorized'] || [];
-  const uncatSection = uncategorized.length > 0
-    ? `\n\nUncategorized (legacy):\n${uncategorized.map((d) => `  - ${d}`).join('\n')}`
-    : '';
+  const hardTokensList = [...hardBlockTokens].sort().join(', ');
+  const hardBlockSection = hardBlockDescriptions.length > 0
+    ? hardBlockDescriptions.map((d) => `  - ${d}`).join('\n')
+    : '  (none yet)';
+  const softBlockSection = softBlockDescriptions.length > 0
+    ? softBlockDescriptions.map((d) => `  - ${d}`).join('\n')
+    : '  (none yet)';
 
   const yearsLine = recentYears.length
     ? `\nAVOID these years (used in the last ${YEAR_AVOID_DAYS} days): ${recentYears.join(', ')}\n`
     : '';
 
   const prompt = `You are creating headlines for a daily newspaper year-guessing game — think pub quiz meets front page.
+
+ABSOLUTE HARD-BLOCK LIST — you MUST NOT produce any headline that touches these subjects, people, organisations, franchises, events or recurring topics. Each has been used within the last ${HARD_BLOCK_DAYS} days. Even a different year of the same recurring topic is BANNED (e.g. if Tour de France 2003 is in the list, no other Tour de France year is allowed; if Kasparov vs Deep Blue 1997 is listed, no other chess-computer match is allowed).
+
+Banned entity/keyword tokens (if your headline text or subject contains ANY of these words, it is an automatic reject):
+${hardTokensList || '(none yet)'}
+
+Banned event descriptions:
+${hardBlockSection}
+
+Secondary avoid list — events from 12–18 months ago. Strongly prefer not to repeat these, and never reuse the same specific event:
+${softBlockSection}
+
+--- END OF BLOCK LISTS ---
 
 Generate exactly 5 real historical newspaper headlines. Each headline must be dramatic, specific, factually accurate, and clearly tied to a single year. Players will see the headline and try to guess the year.
 
@@ -124,9 +152,7 @@ REQUIREMENTS:
 - Choose events that feel familiar to UK, US, and Australian audiences — but not exclusively from those countries
 - ONLY include events you have factual knowledge of. Never invent or guess at events.
 
-CRITICAL — DO NOT use any of the following events (organized by category). Avoid the same underlying event even if you reword the headline:
-
-${blockedSection}${uncatSection}
+Remember the ABSOLUTE HARD-BLOCK LIST at the top of this prompt — none of those topics, people, franchises or recurring events are allowed in any form.
 ${yearsLine}
 Return ONLY a JSON array of 5 objects. Each object MUST have these fields:
 - "category": one of "Sport", "Pop Culture", "Politics/World Events", "Science/Tech", "Crime/Scandal/Disaster"
@@ -139,11 +165,21 @@ Return ONLY a JSON array of 5 objects. Each object MUST have these fields:
 
 Return ONLY the JSON array. No markdown fences, no preamble, no explanation.`;
 
-  // ── 5. Call Claude (with one retry on parse failure) ────────────────────
+  // ── 5. Call Claude with retries on parse failure or topic dup ───────────
   let headlines = null;
   let lastError = null;
+  let lastDupes = [];
 
-  for (let attempt = 1; attempt <= 2 && !headlines; attempt++) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS && !headlines; attempt++) {
+    const attemptPrompt = attempt === 1
+      ? prompt
+      : `${prompt}
+
+YOUR PREVIOUS ATTEMPT PROPOSED THESE HEADLINES WHICH OVERLAP WITH ALREADY-USED TOPICS — DO NOT PROPOSE THESE OR ANY TOPIC INVOLVING THE SAME PEOPLE, ORGANISATIONS, FRANCHISES, EVENTS OR RECURRING SUBJECTS:
+${lastDupes.map((d) => `  - "${d.proposed}" overlaps with previously used "${d.blocked}" (shared: ${d.shared.join(', ')})`).join('\n')}
+
+Pick entirely different subjects this time. Do not reuse the same athletes, teams, tournaments, companies, franchises, people, films, or recurring events that appeared in the blocked list — even if you'd use a different year. This is attempt ${attempt} of ${MAX_ATTEMPTS}; after ${MAX_ATTEMPTS} the day will fail with an error.`;
+
     try {
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -155,7 +191,7 @@ Return ONLY the JSON array. No markdown fences, no preamble, no explanation.`;
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
           max_tokens: 4000,
-          messages: [{ role: 'user', content: prompt }],
+          messages: [{ role: 'user', content: attemptPrompt }],
         }),
       });
       log(`claude attempt ${attempt}`, { status: response.status });
@@ -173,10 +209,27 @@ Return ONLY the JSON array. No markdown fences, no preamble, no explanation.`;
       const jsonStr = start >= 0 && end > start ? clean.slice(start, end + 1) : clean;
       const parsed = JSON.parse(jsonStr);
 
-      if (Array.isArray(parsed) && parsed.length === 5) {
-        headlines = parsed;
-      } else {
+      if (!Array.isArray(parsed) || parsed.length !== 5) {
         lastError = `wrong shape: array=${Array.isArray(parsed)} length=${parsed?.length}`;
+        continue;
+      }
+
+      // Topic-overlap check — hard block (any 1 distinctive token ≥5 chars) vs
+      // soft block (≥2 shared tokens, year-agnostic).
+      const hardDupes = findTopicDupes(parsed, hardBlockFingerprints, { threshold: 1, minLen: 5 });
+      const softDupes = findTopicDupes(parsed, softBlockFingerprints, { threshold: 2, minLen: 4 });
+      const dupes = [...hardDupes, ...softDupes];
+
+      if (dupes.length === 0) {
+        headlines = parsed;
+      } else if (attempt < MAX_ATTEMPTS) {
+        lastDupes = dupes;
+        lastError = `topic dupes on attempt ${attempt}: hard=${hardDupes.length} soft=${softDupes.length}`;
+        log(`topic overlap on attempt ${attempt}`, { hardDupes, softDupes });
+      } else {
+        // Final attempt still clashed — fail closed so we never ship a repeat.
+        log('final attempt still had dupes, failing closed', { hardDupes, softDupes });
+        lastError = `all ${MAX_ATTEMPTS} attempts had topic overlap (hard=${hardDupes.length} soft=${softDupes.length})`;
       }
     } catch (e) {
       lastError = e.message;
@@ -185,7 +238,7 @@ Return ONLY the JSON array. No markdown fences, no preamble, no explanation.`;
   }
 
   if (!headlines) {
-    return respond(500, { error: 'Failed to generate headlines', detail: lastError });
+    return respond(500, { error: 'Failed to generate non-duplicate headlines', detail: lastError, lastDupes });
   }
 
   // ── 6. Build cache value (frontend shape) and updated event list ────────
@@ -291,4 +344,58 @@ function slugify(s) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+// ── Topic-dedup helpers ───────────────────────────────────────────────────
+// Common words that shouldn't count as distinctive topic signals.
+const STOPWORDS = new Set([
+  'the','and','for','with','from','that','this','into','over','under','after','before',
+  'first','second','third','fourth','fifth','last','final','new','world','year','years',
+  'day','days','record','against','between','during','among','wins','win','won','loses',
+  'lost','beats','beat','defeats','defeat','claims','claim','becomes','become','about',
+  'across','amid','another','historic','crowns','crown','makes','made','takes','took',
+  'giant','great','major','epic','huge','massive','return','returns','sets','set','tops',
+  'top','captures','capture','seals','seal','sport','sports','news','breaking','announces',
+  'announce','million','billion','thousand','more','most','its','their','his','her',
+  'north','south','east','west','today','yesterday','nation','nations','country','countries',
+  'people','public','story','report','reports','front','page','headline','headlines',
+]);
+
+function fingerprint(str) {
+  if (!str) return new Set();
+  return new Set(
+    String(str)
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 4 && !STOPWORDS.has(w) && !/^\d+$/.test(w))
+  );
+}
+
+function findTopicDupes(proposedHeadlines, activeFingerprints, opts = {}) {
+  const threshold = opts.threshold ?? 2;
+  const minLen = opts.minLen ?? 4;
+  const dupes = [];
+  for (const h of proposedHeadlines) {
+    const pKeysAll = fingerprint(
+      `${h.eventDescription || ''} ${h.eventKey || ''} ${h.text || ''}`
+    );
+    // Only consider tokens meeting minLen when checking overlap
+    const pKeys = new Set([...pKeysAll].filter((k) => k.length >= minLen));
+    if (pKeys.size === 0) continue;
+    for (const { event, keywords } of activeFingerprints) {
+      const shared = [];
+      for (const k of pKeys) if (keywords.has(k) && k.length >= minLen) shared.push(k);
+      const keyMatch = h.eventKey && event.eventKey && h.eventKey === event.eventKey;
+      if (keyMatch || shared.length >= threshold) {
+        dupes.push({
+          proposed: h.eventDescription || h.text,
+          blocked: event.eventDescription || event.eventKey,
+          shared: keyMatch ? ['eventKey'] : shared,
+        });
+        break; // one match per proposed headline is enough
+      }
+    }
+  }
+  return dupes;
 }
