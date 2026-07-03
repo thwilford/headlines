@@ -13,10 +13,10 @@
   ],
   "functions": {
     "api/generate-headlines.js": {
-      "maxDuration": 60
+      "maxDuration": 300
     },
     "api/cron-headlines.js": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   }
 }
