@@ -1291,6 +1291,7 @@ function calcScore(guess, actual, hintUsed = false) {
   // 0–1000 per-question scale (so 20 raw points per year) to preserve the
   // 0–5000 leaderboard validation and all existing saved scores.
   // A revealed hint halves that question's score (rounded).
+  if (!Number.isFinite(guess) || !Number.isFinite(actual)) return 0;
   const d = Math.abs(guess - actual);
   const base = Math.max(0, 1000 - 20 * d);
   return hintUsed ? Math.round(base / 2) : base;
@@ -2225,7 +2226,19 @@ export default function App() {
   }, [locked]);
 
   const h      = daily[idx];
-  const total  = scores.reduce((a, b) => a + b, 0);
+  // Per-question scores DERIVED from the currently displayed guesses × years ×
+  // hints — not the persisted `scores`, which can drift from the shown edition
+  // after a mid-session reload or a deploy blip. Deriving guarantees the big
+  // total, the per-row scores, the share card and the shared text can NEVER
+  // disagree (the "440 shown for a 342 grid" bug). In a normal completed game
+  // this is identical to the saved scores; it only differs in a drift, where it
+  // shows the honest value for what's actually on screen. Falls back to the
+  // saved scores when the game isn't cleanly complete (e.g. mid-play).
+  const gameComplete =
+    scores.length === daily.length && daily.length > 0 &&
+    guesses.length === daily.length && daily.every((h) => typeof h?.year === "number");
+  const shownScores = gameComplete ? daily.map((h, i) => calcScore(guesses[i], h.year, hints[i])) : scores;
+  const total  = shownScores.reduce((a, b) => a + b, 0);
   const max    = daily.length * 1000;
   const last   = scores[scores.length - 1];
   const diff   = locked ? year - h?.year : null;
@@ -2845,7 +2858,7 @@ export default function App() {
                     Guessed {guesses[i]} — {Math.abs(guesses[i] - h.year) === 0 ? "✓ exact!" : `${Math.abs(guesses[i] - h.year)} yr${Math.abs(guesses[i] - h.year) > 1 ? "s" : ""} off`}
                   </div>
                 </div>
-                <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(20px,6vw,26px)", fontWeight: 900, color: "#121212", flexShrink: 0 }}>{displayScore(scores[i])}</div>
+                <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(20px,6vw,26px)", fontWeight: 900, color: "#121212", flexShrink: 0 }}>{displayScore(shownScores[i])}</div>
               </div>
             ))}
           </div>
@@ -2860,18 +2873,9 @@ export default function App() {
 
   // ── RESULTS ────────────────────────────────────────────────────────────────
   const avg = Math.round(total / daily.length);
-  // Detect drift between the player's saved scores and what the current
-  // `daily` would now produce. Pre-fix, an iOS Safari background-reload
-  // during a seed-fallback session would swap `daily` for fresh API headlines
-  // — leaving the saved total correct but the per-row diffs nonsensical.
-  // The persistence fix prevents this going forward; this banner just
-  // acknowledges it for anyone already in the broken state today.
-  const scorecardDrifted =
-    scores.length > 0 &&
-    scores.length === guesses.length &&
-    scores.length === daily.length &&
-    daily.every(h => typeof h?.year === "number") &&
-    daily.some((h, i) => calcScore(guesses[i], h.year, hints[i]) !== scores[i]);
+  // (Scorecard "drift" is no longer possible to display inconsistently: the
+  // total and every per-row score are derived from the shown guesses × years ×
+  // hints via `shownScores`, so they can't disagree with the grid.)
   return (
     <div style={wrap}>
       <style>{css}</style>
@@ -3005,26 +3009,10 @@ export default function App() {
 
         <div style={{ borderTop: "1px solid #e0e0e0", marginBottom: 24 }} />
 
-        {scorecardDrifted && (
-          <div style={{
-            background: "#fdf4e3",
-            border: "1px solid #d4a373",
-            padding: "12px 14px",
-            marginBottom: 20,
-            fontFamily: "'Source Serif 4', serif",
-            fontSize: 13,
-            lineHeight: 1.45,
-            color: "#5a3a18",
-          }}>
-            <div style={{ fontFamily: "'Playfair Display', serif", fontWeight: 700, fontStyle: "italic", marginBottom: 4 }}>From the desk</div>
-            Your total above is correct, but today's per-row years drifted due to a bug we've already patched. Tomorrow's edition will read straight.
-          </div>
-        )}
-
         <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".16em", textTransform: "uppercase", color: "#666", marginBottom: 14, textAlign: "center" }}>Your score card</div>
-        <ShareCard headlines={daily} guesses={guesses} scores={scores} hints={hints} />
+        <ShareCard headlines={daily} guesses={guesses} scores={shownScores} hints={hints} />
 
-        {showReview && <ReviewScreen headlines={daily} guesses={guesses} scores={scores} onClose={() => setShowReview(false)} countdown={countdown} onPlayMore={openMenu} />}
+        {showReview && <ReviewScreen headlines={daily} guesses={guesses} scores={shownScores} onClose={() => setShowReview(false)} countdown={countdown} onPlayMore={openMenu} />}
 
         <div style={{ borderTop: "1px solid #e0e0e0", marginTop: 30, paddingTop: 20 }}>
           <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#666", marginBottom: 16 }}>Headline by headline</div>
@@ -3040,7 +3028,7 @@ export default function App() {
                   Guessed {guesses[i]} — {Math.abs(guesses[i] - h.year) === 0 ? "✓ exact!" : `${Math.abs(guesses[i] - h.year)} yr${Math.abs(guesses[i] - h.year) > 1 ? "s" : ""} off`}
                 </div>
               </div>
-              <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(20px,6vw,26px)", fontWeight: 900, color: "#121212", flexShrink: 0 }}>{displayScore(scores[i])}</div>
+              <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(20px,6vw,26px)", fontWeight: 900, color: "#121212", flexShrink: 0 }}>{displayScore(shownScores[i])}</div>
             </div>
           ))}
         </div>
