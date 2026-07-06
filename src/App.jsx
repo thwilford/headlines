@@ -1150,6 +1150,28 @@ function HintBlock({ hint, onReveal }) {
   );
 }
 
+// ── TEMPORARY NOTICE ─────────────────────────────────────────────────────────
+// A short transparency banner shown on every screen until SCORE_FIX_NOTICE_UNTIL
+// (inclusive), then it auto-hides forever — no code change needed to remove it.
+// Dismissible per browser. Bump/remove the constant for future one-off notices.
+const SCORE_FIX_NOTICE_UNTIL = '2026-07-08';
+function NoticeBanner() {
+  const [dismissed, setDismissed] = useState(() => !!getStorage('hl_notice_scorefix', false));
+  if (dismissed || getTodayString() > SCORE_FIX_NOTICE_UNTIL) return null;
+  return (
+    <div className="in" style={{ width: '100%', maxWidth: 540, margin: '0 auto 20px', background: '#fdf4e3', border: '1px solid #e3ddcf', borderRadius: 10, padding: '11px 14px', display: 'flex', gap: 10, alignItems: 'flex-start', fontFamily: "'Source Serif 4', serif" }}>
+      <div style={{ fontSize: 13, color: '#5a3a18', lineHeight: 1.5, flex: 1 }}>
+        <strong>Quick note:</strong> a brief display glitch recently made a few scorecards show a total that didn't match their colour grid. It's fixed now — your real score is the one that matches your grid. Thanks for bearing with us!
+      </div>
+      <button
+        onClick={() => { setStorage('hl_notice_scorefix', true); setDismissed(true); }}
+        aria-label="Dismiss notice"
+        style={{ background: 'none', border: 'none', color: '#8a6a3a', fontSize: 16, cursor: 'pointer', lineHeight: 1, padding: 0, flexShrink: 0 }}
+      >✕</button>
+    </div>
+  );
+}
+
 // ── AI HEADLINE GENERATOR ────────────────────────────────────────────────────
 async function generateNewHeadlines(usedIds, existingPool) {
   const usedTexts = existingPool
@@ -2496,6 +2518,7 @@ export default function App() {
   // Burger + overlays — same chrome on every screen.
   const chrome = (
     <>
+      <NoticeBanner />
       <BurgerButton onClick={openMenu} />
       <MenuOverlay
         open={menuOpen && pickerMode === null}
