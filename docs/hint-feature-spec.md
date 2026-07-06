@@ -1,120 +1,83 @@
-# Hint button — design pass
+# Hint feature — build spec
 
-Status: **spec / not built.** Design-first per request. This documents the
-decision surface before any code.
+Status: **designed, ready to build** (pending go-ahead). Research-backed; see
+notes at bottom. Frontend + a small generation change.
 
-## The idea (from notes)
+## Concept: "the rest of the front page"
 
-> A hint button — if you're stuck on a question, you click hint and it explains
-> that by using it you'll score **half points** on this question. The hint is:
-> "At the same time as this headline, this other thing happened: [X]."
+When a player is stuck on a headline, they can reveal a **second, more famous
+headline from the same year** as a clue — brand-native (it's a headlines game),
+teaches history, and no competitor (Timeguessr/Chronophoto) does anything like
+it. Costs **half points** on that question.
 
-The co-event framing is the distinctive part. It doesn't just narrow the range —
-it *teaches* by anchoring the unknown event to a second, more-datable event. That
-fits Headlines' "attentive broadsheet reader" audience and the "placeability over
-fame" philosophy already baked into generation (`api/generate-headlines.js`).
+Example — target is an obscure 1973 event:
+> **ELSEWHERE THAT YEAR**
+> *"OPEC OIL EMBARGO SENDS PETROL PRICES SOARING"*
 
-## What has to be true to ship it
+The clue **brackets the era** (you can place ~the decade) without ever stating a
+year or naming the answer event.
 
-### 1. Hint content — a second dated anchor per headline (the real cost)
+## In-play UX
 
-Today a headline item carries: `text, year, publication, context, category,
-eventKey, eventDescription` (see `dailyPop()` in `api/generate-headlines.js:440`).
-There is **no** second-event field. A co-event hint needs one:
-
-```
-hint: "Weeks earlier, England won the football World Cup at Wembley."   // dated anchor, no year stated
-```
-
-Design rules for the hint string (fold into the generator prompt):
-- Names a **different**, **more-recognisable** event from the **same rough window**
-  (±2–3 years) — enough to bracket the decade, not pinpoint the year.
-- **Never states a year** (that would hand over the answer) and never names the
-  answer event.
-- One sentence. Same placeability bar as the headline itself.
-
-**Cost:** this is real generation work and a schema change. Options:
-- **(A) Generate at creation time** — add `hint` to the batch prompt + output
-  schema, so every new queued headline ships with one. Clean, but doesn't cover
-  the existing queue/back-catalogue.
-- **(B) Backfill pass** — a one-off script over `used_events` / queued items that
-  asks Claude for a hint per existing headline. Needed if we want hints on
-  already-generated editions (Practice Mode reuses those — see the
-  "practice never generates" rule).
-- Recommend **A now, B as a follow-up** once the shape is proven.
-
-Fallback when a headline has no `hint` (old data): hide the button, or offer a
-cheaper generic hint (see tiered options) so the UI degrades gracefully.
-
-### 2. Scoring — half points on a hinted question
-
-`calcScore()` (`src/App.jsx:1130`) is `Math.max(0, 1000 - 20 * d)` internal
-(display = /10). Hinted scoring:
-
-```
-hintUsed ? Math.max(0, Math.round((1000 - 20 * d) / 2))
-         : Math.max(0, 1000 - 20 * d)
-```
-
-Touch points: the lock-in score calc, the results score card, and the drift
-check at `src/App.jsx:2642` (`calcScore(guesses[i], h.year)` must know `hintUsed`
-or it will flag a "drift"). Persist a `hints` boolean array alongside `guesses`
-in the `hl_weekly_v1` entry (`pushDailyHistory`, `src/App.jsx:232`) and in the
-server `weekly` payload, so a hinted game rebuilds correctly on other devices.
-
-### 3. Fairness — leaderboard + share must not hide a hint
-
-A hinted 90 shouldn't silently outrank an honest 88.
-- **Leaderboard** (`api/leaderboard.js`): the submitted total already reflects the
-  half-points, so ranking is self-correcting. Optionally flag hinted games with a
-  small marker (e.g. a "used a hint" dot) — decide later; not required for launch.
-- **Share card** (`ShareCard`, `src/App.jsx:1339`): a hinted question should be
-  visually distinguishable (e.g. a small "💡" on that row) so shared scores stay
-  honest. Low effort, high trust value — include it.
-
-## UX flow
-
-- During play, below the slider: a quiet **"💡 Need a hint?"** link.
-- Tapping it opens a small confirm: *"Using a hint halves your points on this
-  headline. Reveal it?"* — so the cost is explicit and never accidental.
-- On confirm: reveal the co-event line, mark `hintUsed[i] = true`, and show a
-  persistent "½ points — hint used" tag on that question through to results.
+- Under the slider, a quiet link: **🔍 Stuck? See the rest of the front page**
+- Tap → confirm sheet: *"This halves your points on this headline. Reveal a clue?"* → [Reveal] / [Not yet]
+- On reveal: a small framed "mini-masthead" card unfolds — `ELSEWHERE THAT YEAR` + the co-headline in the paper's serif. **No year shown.**
 - One hint per question, irreversible once revealed (keeps scoring simple).
+- A persistent **"½ · hint used"** tag rides that question through to results; a 💡 marks the row on the share card.
+- **Player-initiated only — never auto-pop** (time-based nags are universally hated; research below).
 
-## Tiered hints (optional, later)
+## Data / compute — make it ~free
 
-If the single co-event hint proves popular, a two-tier system:
-- **Tier 1 — cheap:** "The answer is between 19XX and 19YY" (a ~20-year window).
-  Costs less (e.g. −25%). No new data needed — derived from the year.
-- **Tier 2 — rich:** the co-event anchor. Half points.
+Do **NOT** generate on demand (a live Claude call per hint = extra compute,
+latency, and it breaks Practice Mode, which must never call Claude —
+see [[feedback_practice_mode_never_generates]]).
 
-Start with **Tier 2 only** — it's the distinctive, on-brand one. Tier 1 is a fast
-follow if we want a lower-commitment option.
+Instead, **A) bake the hint into the generation call we already make** (primary):
+- Add one field to the batch output schema, `hint` — "a second, more famous
+  headline from the same year; brackets the era to ~a decade; never states a
+  year; never names the answer event."
+- Cost = a handful of extra *output tokens* on a call we already run. No new API
+  call, no round-trip. Stored on the item → Practice Mode works → zero runtime cost.
+- Backfill existing catalogue = one bounded batch job, OR just ship on
+  newly-generated editions and hide the button where `hint` is absent.
 
-## Edge cases
+**B) Zero-generation fallback:** for any headline missing a baked-in `hint`, pull
+a real headline from our existing pool (`used_events` / caches) with the same
+year (±1–2) as the clue. Literally no generation; maximally on-brand. Trade-off:
+coverage gaps for sparse years; can't guarantee the co-headline is *more* famous.
 
-- **Practice Mode** reuses cached editions and must never call Claude
-  (`practice_mode_never_generates`). Hints must therefore be **stored on the
-  item**, not generated on demand — reinforces option A/B above.
-- **Exact-year guess after a hint:** still halved. That's intended — the hint
-  materially helped.
-- **Missing hint data:** hide the button for that item; never block play.
-- **Streak / daily completion:** unaffected — a hinted game is still a completed
-  game.
+## Scoring & fairness
 
-## Build order (when greenlit)
+- `calcScore()` (src/App.jsx): `hintUsed ? round((1000 - 20*d)/2) : 1000 - 20*d`.
+  Touch the lock-in calc, the results card, and the drift check
+  (`calcScore(guesses[i], h.year)` must know `hintUsed` or it flags a false drift).
+- Persist a parallel `hints` boolean array alongside `guesses` in `hl_weekly_v1`
+  (`pushDailyHistory`) and the server `weekly` payload, so a hinted game rebuilds
+  correctly cross-device.
+- **Leaderboard self-corrects** — the submitted total already reflects the penalty.
+  Share card marks hinted rows so shared scores stay honest.
 
-1. Add `hint` to the generation prompt + output schema (option A).
-2. Frontend: hint link + confirm + per-question `hintUsed` state + tag.
-3. Scoring: half-points in `calcScore` path + drift check + persistence
-   (`guesses` gains a parallel `hints` array locally and in the server `weekly`).
-4. Share card marker for hinted rows.
-5. (Follow-up) Backfill script for existing editions; optional leaderboard flag;
-   optional Tier-1 window hint.
+## Open decisions (defaults chosen)
 
-## Recommendation
+- **Penalty:** default **half points**. (Alt: −33% if we find the older/less-gamey
+  audience avoids using it — we *want* them using it. Start at half, watch usage.)
+- **Tiers:** ship **one** hint type (front-page). Leave room for a cheaper
+  "decade window" tier later only if data asks for it.
 
-Ship **Tier 2 (co-event) only**, generated at creation time, half points, with a
-share-card marker and an explicit confirm step. Defer backfill, tiered hints, and
-any leaderboard flagging until the core proves itself. Main cost is the
-generation/schema change (1), not the UI.
+## Build order
+
+1. Generation: add `hint` to prompt + output schema (option A).
+2. Frontend: hint link + confirm + per-question `hintUsed` state + reveal card + tag.
+3. Scoring: half-points path + drift check + persistence (`hints` array local + server).
+4. Share card: 💡 marker on hinted rows.
+5. (Follow-up) Backfill script for existing editions; option-B fallback; optional leaderboard flag.
+
+## Why (research)
+
+- Hints **improve retention** — a stuck player quits and never returns; a hint
+  keeps them in. Direct antidote to the existing "too obscure?" frustration.
+- **Player-initiated, nudge-not-solve, ~50% penalty, framed as learning** are the
+  consistent best-practice findings. The front-page clue frames it as learning,
+  which fits the brand and protects the sense of accomplishment.
+- Genre gap: Timeguessr has no hint; Chronophoto's is a cold mechanical penalty.
+  A *teaching* hint is a genuine differentiator.

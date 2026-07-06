@@ -22,11 +22,11 @@ const PRACTICE_DECADES = [1900,1910,1920,1930,1940,1950,1960,1970,1980,1990,2000
 
 // ── SEED HEADLINES (first 7 days guaranteed, diverse eras & publications) ────
 const SEED_HEADLINES = [
-  { id: "s1",  text: "MAN WALKS ON MOON; 'ONE GIANT LEAP FOR MANKIND'", year: 1969, publication: "The New York Times", pubColor: "#1a1a1a", context: "Neil Armstrong became the first human to walk on the Moon on July 20, 1969. An estimated 600 million people — one fifth of humanity — watched the broadcast live." },
-  { id: "s2",  text: "BERLIN WALL FALLS; EAST GERMANY OPENS ALL BORDERS", year: 1989, publication: "Der Spiegel", pubColor: "#1a1a1a", context: "After 28 years dividing a city and a continent, the Berlin Wall fell on November 9, 1989. Within hours, jubilant crowds began dismantling it with hammers." },
-  { id: "s3",  text: "TITANIC FOUNDERED AT 2:20 A.M.; 1,500 TO 1,800 DEAD", year: 1912, publication: "The New York Times", pubColor: "#1a1a1a", context: "The RMS Titanic sank in the North Atlantic on April 15, 1912, after striking an iceberg on her maiden voyage." },
-  { id: "s4",  text: "CHERNOBYL REACTOR EXPLODES; RADIOACTIVE CLOUD ENGULFS CONTINENT", year: 1986, publication: "The Guardian", pubColor: "#0a4a7c", context: "Reactor No. 4 at the Chernobyl nuclear plant exploded on April 26, 1986, releasing 400 times more radiation than the Hiroshima bomb." },
-  { id: "s5",  text: "LEHMAN BROTHERS COLLAPSES IN LARGEST BANKRUPTCY IN HISTORY", year: 2008, publication: "Financial Times", pubColor: "#c8500a", context: "Lehman Brothers filed for Chapter 11 bankruptcy on September 15, 2008, triggering the worst global financial crisis since the Great Depression." },
+  { id: "s1",  text: "MAN WALKS ON MOON; 'ONE GIANT LEAP FOR MANKIND'", year: 1969, publication: "The New York Times", pubColor: "#1a1a1a", context: "Neil Armstrong became the first human to walk on the Moon on July 20, 1969. An estimated 600 million people — one fifth of humanity — watched the broadcast live.", hint: "WOODSTOCK FESTIVAL DRAWS 400,000 TO A NEW YORK DAIRY FARM" },
+  { id: "s2",  text: "BERLIN WALL FALLS; EAST GERMANY OPENS ALL BORDERS", year: 1989, publication: "Der Spiegel", pubColor: "#1a1a1a", context: "After 28 years dividing a city and a continent, the Berlin Wall fell on November 9, 1989. Within hours, jubilant crowds began dismantling it with hammers.", hint: "TIANANMEN SQUARE UPRISING CRUSHED BY TANKS IN BEIJING" },
+  { id: "s3",  text: "TITANIC FOUNDERED AT 2:20 A.M.; 1,500 TO 1,800 DEAD", year: 1912, publication: "The New York Times", pubColor: "#1a1a1a", context: "The RMS Titanic sank in the North Atlantic on April 15, 1912, after striking an iceberg on her maiden voyage.", hint: "LAST QING EMPEROR ABDICATES AS CHINA BECOMES A REPUBLIC" },
+  { id: "s4",  text: "CHERNOBYL REACTOR EXPLODES; RADIOACTIVE CLOUD ENGULFS CONTINENT", year: 1986, publication: "The Guardian", pubColor: "#0a4a7c", context: "Reactor No. 4 at the Chernobyl nuclear plant exploded on April 26, 1986, releasing 400 times more radiation than the Hiroshima bomb.", hint: "SPACE SHUTTLE CHALLENGER EXPLODES SECONDS AFTER LAUNCH" },
+  { id: "s5",  text: "LEHMAN BROTHERS COLLAPSES IN LARGEST BANKRUPTCY IN HISTORY", year: 2008, publication: "Financial Times", pubColor: "#c8500a", context: "Lehman Brothers filed for Chapter 11 bankruptcy on September 15, 2008, triggering the worst global financial crisis since the Great Depression.", hint: "BARACK OBAMA ELECTED FIRST BLACK U.S. PRESIDENT" },
   { id: "s6",  text: "WORLD HEALTH ORGANISATION DECLARES GLOBAL PANDEMIC", year: 2020, publication: "The Guardian", pubColor: "#0a4a7c", context: "The WHO declared COVID-19 a global pandemic on March 11, 2020. It would go on to cause over 7 million confirmed deaths worldwide." },
   { id: "s7",  text: "NELSON MANDELA WALKS FREE AFTER 27 YEARS IN PRISON", year: 1990, publication: "The Guardian", pubColor: "#0a4a7c", context: "Nelson Mandela was released from Victor Verster Prison on February 11, 1990, marking the beginning of the end of apartheid in South Africa." },
   { id: "s8",  text: "ALLIES LAND IN FRANCE; GREAT INVASION IS ON", year: 1944, publication: "Chicago Tribune", pubColor: "#1a1a1a", context: "D-Day — June 6, 1944 — saw 156,000 Allied troops storm the beaches of Normandy in the largest seaborne invasion in history." },
@@ -229,7 +229,7 @@ function getWeeklyHistory() {
   return Array.isArray(raw) ? raw : [];
 }
 
-function pushDailyHistory(date, score, guesses) {
+function pushDailyHistory(date, score, guesses, hints) {
   const hist = getWeeklyHistory();
   const filtered = hist.filter(e => e.date !== date);
   const entry = { date, score };
@@ -237,6 +237,9 @@ function pushDailyHistory(date, score, guesses) {
   // rebuilt on any device the player signs in on (the answers/headlines are the
   // shared daily edition, so guesses + that edition = the full result).
   if (Array.isArray(guesses) && guesses.length) entry.guesses = guesses;
+  // Only persist hints when at least one was used, so most entries stay tiny.
+  // Needed so a hinted game's per-question scores rebuild correctly cross-device.
+  if (Array.isArray(hints) && hints.some(Boolean)) entry.hints = hints;
   filtered.push(entry);
   filtered.sort((a, b) => a.date.localeCompare(b.date));
   // Retain up to ~1 year so the results chart can offer W / M / 6M / Y ranges.
@@ -1102,6 +1105,51 @@ function ScoringExplainer({ onOpenInfo }) {
   );
 }
 
+// ── HINT: "the rest of the front page" ───────────────────────────────────────
+// Prototype of the in-play hint. Reveals a second, more famous headline from the
+// same year as a clue (never states the year). Self-contained state for now;
+// the real version wires `hint` from the headline + a half-points penalty.
+function HintBlock({ hint, onReveal }) {
+  const [stage, setStage] = useState("idle"); // idle | confirm | revealed
+  const serif = "'Source Serif 4', serif";
+  // Confirm + reveal share a reserved height (content vertically centred) so the
+  // Lock-in button below never shifts when you go from confirm → revealed.
+  // Sized to fit a 2-line clue; the generator caps hint length so it holds.
+  const reserved = { minHeight: 156, display: "flex", flexDirection: "column", justifyContent: "center", margin: "6px 0 20px" };
+
+  if (stage === "revealed") {
+    return (
+      <div style={reserved}>
+        <div style={{ border: "1px solid #121212", background: "#fbfaf5", padding: "15px 16px 16px" }}>
+          <div style={{ fontFamily: serif, fontSize: 10, letterSpacing: ".2em", textTransform: "uppercase", color: "#b91c1c", textAlign: "center", marginBottom: 9, borderBottom: "1px solid #e6e0d2", paddingBottom: 8 }}>Elsewhere that year</div>
+          <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(15px,4.4vw,19px)", fontWeight: 900, fontStyle: "italic", color: "#121212", lineHeight: 1.3, textAlign: "center" }}>“{hint}”</div>
+        </div>
+        <div style={{ textAlign: "center", marginTop: 9, fontFamily: serif, fontSize: 12, color: "#b8860b", fontStyle: "italic" }}>½ points on this headline · hint used</div>
+      </div>
+    );
+  }
+
+  if (stage === "confirm") {
+    return (
+      <div style={{ ...reserved, border: "1px solid #e3ddcf", background: "#faf7f0", borderRadius: 12, padding: "15px 16px", textAlign: "center" }}>
+        <div style={{ fontFamily: serif, fontSize: 14, color: "#444", lineHeight: 1.5, marginBottom: 13 }}>This <strong>halves your points</strong> on this headline. Reveal a clue?</div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+          <button onClick={() => setStage("idle")} style={{ padding: "9px 18px", border: "1px solid #d0d0d0", background: "#fff", borderRadius: 8, fontFamily: serif, fontSize: 13.5, cursor: "pointer", color: "#555" }}>Not yet</button>
+          <button onClick={() => { setStage("revealed"); onReveal?.(); }} style={{ padding: "9px 18px", border: "none", background: "#121212", color: "#fff", borderRadius: 8, fontFamily: serif, fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>Reveal clue →</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ textAlign: "center", margin: "2px 0 20px" }}>
+      <button onClick={() => setStage("confirm")} style={{ background: "none", border: "none", color: "#777", fontFamily: serif, fontSize: 13.5, cursor: "pointer", padding: 6 }}>
+        🔍 <span style={{ textDecoration: "underline" }}>Stuck? See another headline from the same year</span>
+      </button>
+    </div>
+  );
+}
+
 // ── AI HEADLINE GENERATOR ────────────────────────────────────────────────────
 async function generateNewHeadlines(usedIds, existingPool) {
   const usedTexts = existingPool
@@ -1237,13 +1285,15 @@ const MIN = 1900, MAX = 2026;
 const TODAY_LONG  = new Date().toLocaleDateString("en-US", { month: "long",  day: "numeric", year: "numeric" });
 const TODAY_SHORT = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
-function calcScore(guess, actual) {
+function calcScore(guess, actual, hintUsed = false) {
   // Linear scoring: you lose 2 displayed points for every year you're off
   // (exact = 100, 10 yrs off = 80, 50+ yrs off = 0). Kept on the internal
   // 0–1000 per-question scale (so 20 raw points per year) to preserve the
   // 0–5000 leaderboard validation and all existing saved scores.
+  // A revealed hint halves that question's score (rounded).
   const d = Math.abs(guess - actual);
-  return Math.max(0, 1000 - 20 * d);
+  const base = Math.max(0, 1000 - 20 * d);
+  return hintUsed ? Math.round(base / 2) : base;
 }
 
 // Verdict tiers. `avg` is the mean raw score per headline (0–1000); display
@@ -1346,7 +1396,7 @@ function dotColor(d) {
 }
 
 // ── SHARE CARD ───────────────────────────────────────────────────────────────
-function ShareCard({ headlines, guesses, scores }) {
+function ShareCard({ headlines, guesses, scores, hints }) {
   const total  = scores.reduce((a, b) => a + b, 0);
   const max    = headlines.length * 1000;
   const avg    = Math.round(total / headlines.length);
@@ -1371,6 +1421,7 @@ function ShareCard({ headlines, guesses, scores }) {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
                 <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 900, color: "#121212" }}>{h.year}</div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  {hints?.[i] && <span title="hint used" style={{ fontSize: 12 }}>💡</span>}
                   {!exact && <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#555", fontStyle: "italic" }}>guessed {guesses[i]}</div>}
                   <div style={{ padding: "2px 8px", background: col, color: "#fff", fontFamily: "'Source Serif 4', serif", fontSize: 11, fontWeight: 600, borderRadius: 2 }}>
                     {exact ? "✓ Exact" : `${guesses[i] > h.year ? "+" : ""}${guesses[i] - h.year}yr${d !== 1 ? "s" : ""}`}
@@ -1846,6 +1897,11 @@ export default function App() {
   }, []);
   const [scores,   setScores]   = useState(validSave ? (getStorage("hl_scores") || []) : []);
   const [guesses,  setGuesses]  = useState(validSave ? (getStorage("hl_guesses") || []) : []);
+  // Per-question hint usage, parallel to guesses/scores. `hintRevealed` tracks
+  // the CURRENT question only; it's pushed into `hints` on lock and reset on
+  // advance. Not persisted per-question (a mid-question reload just re-arms it).
+  const [hints,    setHints]    = useState(validSave ? (getStorage("hl_hints") || []) : []);
+  const [hintRevealed, setHintRevealed] = useState(false);
   // idx is "index of next question to play". `locked` isn't persisted, so a
   // remount after Lock-without-Next would otherwise land the player back on
   // the just-answered question — and a re-lock would double-count their
@@ -1931,8 +1987,10 @@ export default function App() {
   function viewRemoteResults() {
     const g = remotePlayedToday?.guesses;
     if (!Array.isArray(g) || g.length !== daily.length || daily.length === 0) return;
+    const rh = Array.isArray(remotePlayedToday?.hints) ? remotePlayedToday.hints : [];
     setGuesses(g);
-    setScores(g.map((gy, i) => calcScore(gy, daily[i].year)));
+    setHints(rh);
+    setScores(g.map((gy, i) => calcScore(gy, daily[i].year, rh[i])));
     setRemotePlayedToday(null);
     setPhase('results');
   }
@@ -2040,6 +2098,7 @@ export default function App() {
       setStorage("hl_phase", phase === "results" ? "done" : phase);
       setStorage("hl_scores", scores);
       setStorage("hl_guesses", guesses);
+      setStorage("hl_hints", hints);
       setStorage("hl_idx", idx);
       // Anchor PLAY_DATE so resume works regardless of how the daily
       // headlines came in (cache hit, fresh API, or seed fallback). This is
@@ -2060,7 +2119,7 @@ export default function App() {
         setStorage(STORAGE_KEYS.ACTIVE_PLAY_AT, Date.now());
       }
     }
-  }, [phase, scores, guesses, idx, daily, activeSession, appMode]);
+  }, [phase, scores, guesses, hints, idx, daily, activeSession, appMode]);
 
   const [aiStatus, setAiStatus] = useState("");
 
@@ -2148,7 +2207,7 @@ export default function App() {
       const today = getTodayString();
       const hist = getWeeklyHistory();
       if (!hist.some(e => e.date === today)) {
-        pushDailyHistory(today, scores.reduce((a, b) => a + b, 0), guesses);
+        pushDailyHistory(today, scores.reduce((a, b) => a + b, 0), guesses, hints);
       }
       refreshStreak();
       // If signed in, push today's result up so the streak is saved server-side.
@@ -2177,9 +2236,10 @@ export default function App() {
 
   function lock() {
     if (locked) return;
-    const newScore = calcScore(year, h.year);
+    const newScore = calcScore(year, h.year, hintRevealed);
     setScores(s  => [...s, newScore]);
     setGuesses(g => [...g, year]);
+    setHints(hs  => [...hs, hintRevealed]);
     setLocked(true);
     playScoreSound(newScore);
     // Magic moment: exact year → slam the date-stamp. Auto-clears after the
@@ -2206,12 +2266,13 @@ export default function App() {
       // [...scores, calcScore(...)] (the old code) double-counted Q5 — which
       // also breaks /api/leaderboard validation when a score nears 5000.
       const finalTotal = scores.reduce((a, b) => a + b, 0);
-      pushDailyHistory(getTodayString(), finalTotal, guesses);
+      pushDailyHistory(getTodayString(), finalTotal, guesses, hints);
       fetch('/api/track-completion', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        // guesses feed the per-headline distribution (real "how you compared" + admin difficulty)
-        body: JSON.stringify({ score: finalTotal, date: getTodayString(), guesses })
+        // guesses feed the per-headline distribution (real "how you compared" + admin difficulty).
+        // hints feed hint-usage aggregation in admin (how many players used a clue).
+        body: JSON.stringify({ score: finalTotal, date: getTodayString(), guesses, hints })
       }).catch(() => {});
 
       // Submit to leaderboard, then fetch results
@@ -2227,7 +2288,7 @@ export default function App() {
         .then(data => setLeaderboard(data))
         .catch(() => {});
     }
-    else { setIdx(i => i + 1) || window.scrollTo({top: 0, behavior: "smooth"}); setYear(1970); setLocked(false); setVisible(false); }
+    else { setIdx(i => i + 1) || window.scrollTo({top: 0, behavior: "smooth"}); setYear(1970); setLocked(false); setVisible(false); setHintRevealed(false); }
   }
 
   async function handleShare() {
@@ -2236,7 +2297,8 @@ export default function App() {
       const d = Math.abs(diff);
       const dot = d <= 3 ? "🟩" : d <= 10 ? "🟨" : "🟥";
       const label = d === 0 ? "✓" : `${diff > 0 ? "+" : ""}${diff}`;
-      return `${dot}${label}`;
+      // 💡 marks a hinted question so shared scores stay honest.
+      return `${dot}${label}${hints[i] ? "💡" : ""}`;
     }).join("  ");
     const card = `📰 HEADLINES · ${TODAY_SHORT}\n${squares}\n${displayScore(total)} / ${displayScore(max)} · ${getVerdict(Math.round(total / daily.length))} · www.headlines.games`;
     const track = () => fetch('/api/track-share', {
@@ -2295,7 +2357,7 @@ export default function App() {
 
   function reset() {
     setPhase("intro"); setIdx(0); setYear(1970);
-    setLocked(false); setScores([]); setGuesses([]); setVisible(false);
+    setLocked(false); setScores([]); setGuesses([]); setHints([]); setHintRevealed(false); setVisible(false);
   }
 
   // ── PRACTICE MODE HELPERS ─────────────────────────────────────────────
@@ -2320,7 +2382,7 @@ export default function App() {
     // the wrong `daily` and silently leak practice content into the next
     // daily-mode persistence write.
     if (appMode !== 'practice') {
-      dailySnapshot.current = { phase, idx, year, locked, scores, guesses, daily, leaderboard };
+      dailySnapshot.current = { phase, idx, year, locked, scores, guesses, hints, daily, leaderboard };
     }
     setAppMode('practice');
     setPracticeFilter({ type, value, label });
@@ -2330,7 +2392,7 @@ export default function App() {
     // Reset game state and fetch the practice round
     setPhase('play');
     setIdx(0); setYear(1970); setLocked(false); setVisible(false);
-    setScores([]); setGuesses([]);
+    setScores([]); setGuesses([]); setHints([]); setHintRevealed(false);
     setActiveSession(true);
     setLoading(true);
     setDaily([]);
@@ -2363,6 +2425,7 @@ export default function App() {
       setLocked(s.locked);
       setScores(s.scores);
       setGuesses(s.guesses);
+      setHints(s.hints || []); setHintRevealed(false);
       setDaily(s.daily);
       setLeaderboard(s.leaderboard);
       setVisible(false);
@@ -2548,7 +2611,7 @@ export default function App() {
         <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(20px,5vw,26px)", fontWeight: 900, color: "#121212", lineHeight: 1.3, marginBottom: 8 }}>You've got headlines left to guess</div>
         <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 14, color: "#555", marginBottom: 30 }}>{scores.length} of {daily.length} completed · {displayScore(total)} / {displayScore(max)} points so far</div>
 
-        <button className="btn" onClick={() => { setActiveSession(true); setLocked(false); setYear(1970); setVisible(false); window.scrollTo({top: 0, behavior: "smooth"}); }}>Continue playing →</button>
+        <button className="btn" onClick={() => { setActiveSession(true); setLocked(false); setYear(1970); setVisible(false); setHintRevealed(false); window.scrollTo({top: 0, behavior: "smooth"}); }}>Continue playing →</button>
         <div style={{ textAlign: "center", marginTop: 16, fontFamily: "'Source Serif 4', serif", fontSize: 12, color: "#666", fontStyle: "italic" }}>{TODAY_LONG} · New headlines in {countdown}</div>
       </div>
     </div>
@@ -2700,6 +2763,8 @@ export default function App() {
             ))}
           </div>
 
+          {!locked && h.hint && <HintBlock key={idx} hint={h.hint} onReveal={() => setHintRevealed(true)} />}
+
           {!locked ? (
             <button className="btn" onClick={lock}>Lock in {year} →</button>
           ) : (
@@ -2806,7 +2871,7 @@ export default function App() {
     scores.length === guesses.length &&
     scores.length === daily.length &&
     daily.every(h => typeof h?.year === "number") &&
-    daily.some((h, i) => calcScore(guesses[i], h.year) !== scores[i]);
+    daily.some((h, i) => calcScore(guesses[i], h.year, hints[i]) !== scores[i]);
   return (
     <div style={wrap}>
       <style>{css}</style>
@@ -2957,7 +3022,7 @@ export default function App() {
         )}
 
         <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".16em", textTransform: "uppercase", color: "#666", marginBottom: 14, textAlign: "center" }}>Your score card</div>
-        <ShareCard headlines={daily} guesses={guesses} scores={scores} />
+        <ShareCard headlines={daily} guesses={guesses} scores={scores} hints={hints} />
 
         {showReview && <ReviewScreen headlines={daily} guesses={guesses} scores={scores} onClose={() => setShowReview(false)} countdown={countdown} onPlayMore={openMenu} />}
 

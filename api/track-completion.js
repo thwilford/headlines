@@ -34,7 +34,7 @@ export default async function handler(req, res) {
 }
 
 async function handlePost(req, res) {
-  const { score, date, guesses } = req.body || {};
+  const { score, date, guesses, hints } = req.body || {};
   if (!isValidDate(date)) return res.status(400).json({ error: 'Missing/invalid date' });
   const numScore = Number(score) || 0;
   if (numScore < 0 || numScore > 5000) return res.status(400).json({ error: 'Invalid score' });
@@ -60,6 +60,19 @@ async function handlePost(req, res) {
         commands.push(['HINCRBY', `guessdist:${date}:${i}`, String(y), 1]);
       }
     });
+  }
+
+  // Hint-usage aggregation — the "do people want hints?" signal. hintGames =
+  // players who used >=1 hint; hintUses = total hints; hintdist:<date> = which
+  // headlines get hinted most (a difficulty signal). Admin surfaces these later.
+  if (Array.isArray(hints)) {
+    const used = hints.slice(0, MAX_HEADLINES).map(Boolean);
+    const total = used.filter(Boolean).length;
+    if (total > 0) {
+      commands.push(['HINCRBY', `stats:${date}`, 'hintGames', 1]);
+      commands.push(['HINCRBY', `stats:${date}`, 'hintUses', total]);
+      used.forEach((u, i) => { if (u) commands.push(['HINCRBY', `hintdist:${date}`, String(i), 1]); });
+    }
   }
 
   try {

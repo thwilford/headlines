@@ -366,12 +366,56 @@ export function isValidHeadline(h) {
 }
 
 // ── Core flow: cache → queue pop → (emergency refill) → cache write ───────
+// "The rest of the front page" hint: for each headline, attach a `hint` — the
+// text of ANOTHER real headline from the pool within ±2 years (a different
+// event, preferably a different category). Zero LLM: it just reuses headlines
+// we already generated. Headlines with no same-era neighbour in the pool get no
+// hint, and the client simply hides the hint button for them.
+function attachPoolHints(headlines, pool) {
+  if (!Array.isArray(pool) || !pool.length) return;
+  const used = new Set(headlines.map((h) => (h.text || '').toUpperCase()));
+  for (const h of headlines) {
+    if (h.hint || typeof h.year !== 'number') continue;
+    const cands = pool.filter(
+      (e) => e && e.text && typeof e.year === 'number'
+        && Math.abs(e.year - h.year) <= 2
+        && !used.has(e.text.toUpperCase())
+    );
+    if (!cands.length) continue;
+    // Closest year first; then prefer a different category; deterministic so the
+    // same edition always yields the same clue.
+    cands.sort((a, b) => {
+      const dy = Math.abs(a.year - h.year) - Math.abs(b.year - h.year);
+      if (dy !== 0) return dy;
+      const ca = a.category === h.category ? 1 : 0;
+      const cb = b.category === h.category ? 1 : 0;
+      if (ca !== cb) return ca - cb;
+      return (a.text || '').localeCompare(b.text || '');
+    });
+    h.hint = cands[0].text;
+    used.add(h.hint.toUpperCase()); // don't reuse the same clue twice in one edition
+  }
+}
+
 export async function dailyPop(date, log) {
   const cacheKey = `headlines:${date}`;
 
   const cached = await kvGet(cacheKey, log);
   if (Array.isArray(cached) && cached.length === DAILY_CATEGORY_COUNT && cached.every(isValidHeadline)) {
     log?.('cache hit', { date });
+    // Serve-time hint enrichment. Editions cached before hints existed (or with a
+    // headline whose clue is still missing) get "rest of the front page" clues
+    // attached IN MEMORY from the pool. We never write back — headlines:* stays
+    // immutable (load-bearing for Practice Mode) — and we only pay the pool read
+    // when a hint is actually missing, so hint-carrying editions cost nothing.
+    try {
+      if (cached.some((h) => !h.hint)) {
+        attachPoolHints(cached, toArray(await kvGet('used_events', log)));
+      }
+    } catch (e) {
+      // Hints are a nice-to-have — never let enrichment break the daily serve.
+      log?.('hint enrich failed', { error: e.message });
+    }
     return { headlines: cached, source: 'cache' };
   }
   if (Array.isArray(cached) && cached.length === DAILY_CATEGORY_COUNT) {
@@ -460,6 +504,10 @@ export async function dailyPop(date, log) {
     context: item.context || '',
     category: item.category || todaysCategories[i],
   }));
+
+  // Attach "rest of the front page" hints from the existing pool (zero LLM).
+  // Done before caching so the edition carries its clues and serving is free.
+  attachPoolHints(headlines, toArray(usedRawForPop));
 
   const now = Date.now();
   const used = toArray(await kvGet('used_events', log));

@@ -210,12 +210,17 @@ function mergeWeekly(a, b) {
       const prev = byDate.get(e.date);
       const score = Number(e.score) || 0;
       const guesses = Array.isArray(e.guesses) ? e.guesses : (prev && prev.guesses);
+      // Per-question hint flags travel with guesses so a hinted game's per-row
+      // scores rebuild correctly on another device (halved where a hint was used).
+      const hints = Array.isArray(e.hints) ? e.hints : (prev && prev.hints);
       if (!prev || score > prev.score) {
         const entry = { date: e.date, score: prev && score < prev.score ? prev.score : score };
         if (guesses) entry.guesses = guesses;
+        if (hints) entry.hints = hints;
         byDate.set(e.date, entry);
-      } else if (guesses && !prev.guesses) {
-        prev.guesses = guesses; // backfill guesses onto the kept (higher-score) entry
+      } else {
+        if (guesses && !prev.guesses) prev.guesses = guesses; // backfill onto the kept (higher-score) entry
+        if (hints && !prev.hints) prev.hints = hints;
       }
     }
   }
