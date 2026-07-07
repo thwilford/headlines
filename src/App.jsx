@@ -1094,10 +1094,10 @@ function FeedbackModal({ open, onClose }) {
 
 function ScoringExplainer({ onOpenInfo }) {
   return (
-    <div style={{ borderTop: "1px solid #f0f0f0", marginTop: 32, paddingTop: 20 }}>
+    <div style={{ marginTop: 28, textAlign: "center" }}>
       <button
         onClick={onOpenInfo}
-        style={{ width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontFamily: "'Source Serif 4', serif", fontSize: 12, letterSpacing: ".06em", textTransform: "uppercase", color: "#666" }}
+        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "'Source Serif 4', serif", fontSize: 12, letterSpacing: ".06em", textTransform: "uppercase", color: "#666", textDecoration: "underline" }}
       >
         How is your score worked out?
       </button>
@@ -3084,7 +3084,7 @@ export default function App() {
         <ScoringExplainer onOpenInfo={() => setScoringInfoOpen(true)} />
         <ScoringInfoModal open={scoringInfoOpen} onClose={() => setScoringInfoOpen(false)} />
 
-        <div style={{ borderTop: "1px solid #f0f0f0", marginTop: 32, paddingTop: 24 }}>
+        <div style={{ marginTop: 30 }}>
           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 18, fontWeight: 700, color: "#121212", marginBottom: 10, textAlign: "center" }}>
             How can we make Headlines better?
           </div>
