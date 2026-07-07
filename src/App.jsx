@@ -1172,6 +1172,40 @@ function NoticeBanner() {
   );
 }
 
+// ── HINT HELPFULNESS VOTE ────────────────────────────────────────────────────
+// Once-per-day "was the hint helpful?" shown on the results screen ONLY to
+// players who used at least one clue. This is the QUALITY signal (are the clues
+// any good) — the usage / "do people want hints" signal is already logged from
+// every completed game. Records to the existing track-completion endpoint.
+function HintVote({ show, date }) {
+  const [voted, setVoted] = useState(() => !!getStorage(`hl_hint_vote_${date}`, false));
+  const [justVoted, setJustVoted] = useState(false);
+  if (!show || (voted && !justVoted)) return null;
+
+  const card = (children) => (
+    <div className="in" style={{ border: "1px solid #e3ddcf", background: "#faf7f0", borderRadius: 12, padding: "14px 16px", marginBottom: 28, textAlign: "center", fontFamily: "'Source Serif 4', serif" }}>{children}</div>
+  );
+  if (justVoted) return card(<div style={{ fontSize: 13.5, color: "#1a7c3a", fontStyle: "italic" }}>✓ Thanks — that helps us tune the clues.</div>);
+
+  const vote = (v) => {
+    setStorage(`hl_hint_vote_${date}`, v);
+    setVoted(true); setJustVoted(true);
+    fetch('/api/track-completion', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, hintVote: v }),
+    }).catch(() => {});
+  };
+  const btn = (label, v) => (
+    <button onClick={() => vote(v)} style={{ padding: "8px 24px", border: "1px solid #d8cfb8", background: "#fff", borderRadius: 10, fontSize: 20, cursor: "pointer", lineHeight: 1 }}>{label}</button>
+  );
+  return card(
+    <>
+      <div style={{ fontSize: 14, color: "#444", marginBottom: 12 }}>You used a clue this round — was it helpful?</div>
+      <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>{btn("👍", "up")}{btn("👎", "down")}</div>
+    </>
+  );
+}
+
 // ── AI HEADLINE GENERATOR ────────────────────────────────────────────────────
 async function generateNewHeadlines(usedIds, existingPool) {
   const usedTexts = existingPool
@@ -3034,6 +3068,13 @@ export default function App() {
 
         <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".16em", textTransform: "uppercase", color: "#666", marginBottom: 14, textAlign: "center" }}>Your score card</div>
         <ShareCard headlines={daily} guesses={guesses} scores={shownScores} hints={hints} />
+
+        {/* Quality signal: only shown to daily players who used a clue, once/day. */}
+        {appMode === "daily" && (
+          <div style={{ marginTop: 24 }}>
+            <HintVote show={Array.isArray(hints) && hints.some(Boolean)} date={getTodayString()} />
+          </div>
+        )}
 
         {showReview && <ReviewScreen headlines={daily} guesses={guesses} scores={shownScores} onClose={() => setShowReview(false)} countdown={countdown} onPlayMore={openMenu} />}
 

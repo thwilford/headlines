@@ -34,8 +34,16 @@ export default async function handler(req, res) {
 }
 
 async function handlePost(req, res) {
-  const { score, date, guesses, hints } = req.body || {};
+  const { score, date, guesses, hints, hintVote } = req.body || {};
   if (!isValidDate(date)) return res.status(400).json({ error: 'Missing/invalid date' });
+
+  // Hint helpfulness vote — a standalone quality signal. Handled first and
+  // returned early so a vote never bumps completion/score aggregates.
+  if (hintVote === 'up' || hintVote === 'down') {
+    await pipeline([['HINCRBY', `stats:${date}`, hintVote === 'up' ? 'hintVoteUp' : 'hintVoteDown', 1]]);
+    return res.status(200).json({ ok: true });
+  }
+
   const numScore = Number(score) || 0;
   if (numScore < 0 || numScore > 5000) return res.status(400).json({ error: 'Invalid score' });
 
