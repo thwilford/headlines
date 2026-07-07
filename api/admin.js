@@ -63,7 +63,19 @@ async function adminDifficulty(req, res) {
   if (!Array.isArray(edition) || edition.length === 0) {
     return res.status(200).json({ date, headlines: [] });
   }
-  const distRaw = await pipeline(edition.map((_, i) => ['HGETALL', `guessdist:${date}:${i}`]));
+  const cmds = edition.map((_, i) => ['HGETALL', `guessdist:${date}:${i}`]);
+  cmds.push(['HGETALL', `hintdist:${date}`]); // per-headline "hints used on this one" counts
+  const distRaw = await pipeline(cmds);
+  // Parse the hint-usage hash (index -> count) once.
+  const hintByIdx = {};
+  const hintRaw = distRaw?.[edition.length]?.result;
+  if (Array.isArray(hintRaw)) {
+    for (let j = 0; j < hintRaw.length; j += 2) {
+      const idx = parseInt(hintRaw[j], 10);
+      const c = parseInt(hintRaw[j + 1], 10);
+      if (Number.isFinite(idx) && Number.isFinite(c)) hintByIdx[idx] = c;
+    }
+  }
   const headlines = edition.map((h, i) => {
     const dist = {};
     const raw = distRaw?.[i]?.result;
@@ -83,6 +95,7 @@ async function adminDifficulty(req, res) {
       publication: h?.publication || null,
       total,
       dist,
+      hintCount: hintByIdx[i] || 0, // players who used a clue on this headline
     };
   });
   return res.status(200).json({ date, headlines });

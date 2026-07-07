@@ -587,7 +587,7 @@ function HeadlineSpread({ h }) {
 
   return (
     <div style={{ borderTop: "1px solid #eee", padding: "14px 0" }}>
-      <div style={{ fontSize: 11, color: "#666", marginBottom: 2 }}>{h.category || "—"} · {h.publication || "—"} · true year <b>{h.year}</b> · {total} guesses</div>
+      <div style={{ fontSize: 11, color: "#666", marginBottom: 2 }}>{h.category || "—"} · {h.publication || "—"} · true year <b>{h.year}</b> · {total} guesses{h.hintCount > 0 && <> · 🔍 <b style={{ color: "#b8860b" }}>{h.hintCount}</b> used a clue</>}</div>
       <div style={{ fontSize: 13.5, color: "#222", marginBottom: 8, lineHeight: 1.35 }}>{h.text}</div>
       {!enough ? (
         <div style={{ fontSize: 12, color: "#999", fontStyle: "italic" }}>Not enough guesses yet.</div>
