@@ -3078,25 +3078,9 @@ export default function App() {
 
         {showReview && <ReviewScreen headlines={daily} guesses={guesses} scores={shownScores} onClose={() => setShowReview(false)} countdown={countdown} onPlayMore={openMenu} />}
 
-        <div style={{ borderTop: "1px solid #e0e0e0", marginTop: 30, paddingTop: 20 }}>
-          <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "#666", marginBottom: 16 }}>Headline by headline</div>
-          {daily.map((h, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderBottom: "1px solid #f5f5f5", gap: 14 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                  <div style={{ width: 2, height: 10, background: h.pubColor, borderRadius: 1, flexShrink: 0 }} />
-                  <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#555" }}>{h.publication} · {h.year}</span>
-                </div>
-                <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(12px,3vw,13px)", fontWeight: 700, fontStyle: "italic", color: "#121212", lineHeight: 1.3 }}>"{h.text.split(" ").slice(0, 6).join(" ")}…"</div>
-                <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 11, color: "#666", marginTop: 3 }}>
-                  Guessed {guesses[i]} — {Math.abs(guesses[i] - h.year) === 0 ? "✓ exact!" : `${Math.abs(guesses[i] - h.year)} yr${Math.abs(guesses[i] - h.year) > 1 ? "s" : ""} off`}
-                </div>
-              </div>
-              <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "clamp(20px,6vw,26px)", fontWeight: 900, color: "#121212", flexShrink: 0 }}>{displayScore(shownScores[i])}</div>
-            </div>
-          ))}
-        </div>
-
+        {/* "Headline by headline" list removed — the per-headline detail now
+            lives in the Review-your-answers analysis flow (and the score card
+            above), so it's no longer duplicated here. */}
         <ScoringExplainer onOpenInfo={() => setScoringInfoOpen(true)} />
         <ScoringInfoModal open={scoringInfoOpen} onClose={() => setScoringInfoOpen(false)} />
 
