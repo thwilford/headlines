@@ -2306,9 +2306,15 @@ export default function App() {
   function lock() {
     if (locked) return;
     const newScore = calcScore(year, h.year, hintRevealed);
-    setScores(s  => [...s, newScore]);
-    setGuesses(g => [...g, year]);
-    setHints(hs  => [...hs, hintRevealed]);
+    // Idempotent appends, keyed to `idx`. `if (locked)` alone can't stop a
+    // double-fire: `locked` is the stale render-closure value, so two clicks in
+    // one tick (a fast double-tap — easy now the hint layout shifts the button)
+    // both pass the guard and each append. Guarding on array length vs idx makes
+    // the second call a no-op: React applies functional updates in sequence, so
+    // the 2nd updater sees the 1st's appended entry and returns it unchanged.
+    setScores(s  => s.length > idx ? s : [...s, newScore]);
+    setGuesses(g => g.length > idx ? g : [...g, year]);
+    setHints(hs  => hs.length > idx ? hs : [...hs, hintRevealed]);
     setLocked(true);
     playScoreSound(newScore);
     // Magic moment: exact year → slam the date-stamp. Auto-clears after the
@@ -2357,7 +2363,9 @@ export default function App() {
         .then(data => setLeaderboard(data))
         .catch(() => {});
     }
-    else { setIdx(i => i + 1) || window.scrollTo({top: 0, behavior: "smooth"}); setYear(1970); setLocked(false); setVisible(false); setHintRevealed(false); }
+    // `i > idx ? i : i + 1` keeps a double-tap on "Next" from advancing twice
+    // (which would skip a question); the 2nd call sees the already-incremented idx.
+    else { setIdx(i => i > idx ? i : i + 1) || window.scrollTo({top: 0, behavior: "smooth"}); setYear(1970); setLocked(false); setVisible(false); setHintRevealed(false); }
   }
 
   async function handleShare() {
