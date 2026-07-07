@@ -196,6 +196,12 @@ function AnalyticsTab({ stats, countriesAllTime }) {
   const totalVisits = visitCounts.reduce((a, b) => a + b, 0);
   const totalCompletions = playerCounts.reduce((a, b) => a + b, 0);
   const totalShares = shareCounts.reduce((a, b) => a + b, 0);
+  // Hint signals across the range.
+  const totalHintGames = chartDays.reduce((a, d) => a + (stats[d].hintGames || 0), 0);
+  const totalHintUses = chartDays.reduce((a, d) => a + (stats[d].hintUses || 0), 0);
+  const totalHintUp = chartDays.reduce((a, d) => a + (stats[d].hintVoteUp || 0), 0);
+  const totalHintDown = chartDays.reduce((a, d) => a + (stats[d].hintVoteDown || 0), 0);
+  const hintPct = totalCompletions > 0 ? Math.round((totalHintGames / totalCompletions) * 100) : 0;
 
   return (
     <>
@@ -234,6 +240,14 @@ function AnalyticsTab({ stats, countriesAllTime }) {
         <div className="admin-card" style={{ flex: 1, minWidth: 130, border: "1px solid #eee", borderRadius: 6, padding: "12px 14px", background: "#fafafa" }}>
           <div style={{ fontSize: 11, letterSpacing: ".08em", color: "#777", textTransform: "uppercase" }}>Shares</div>
           <div className="admin-card-big" style={{ fontSize: 22, fontWeight: "bold", color: "#121212", marginTop: 4 }}>{totalShares.toLocaleString()}</div>
+        </div>
+        <div className="admin-card" style={{ flex: 1, minWidth: 130, border: "1px solid #eee", borderRadius: 6, padding: "12px 14px", background: "#fafafa" }}>
+          <div style={{ fontSize: 11, letterSpacing: ".08em", color: "#777", textTransform: "uppercase" }}>Hints used</div>
+          <div className="admin-card-big" style={{ fontSize: 22, fontWeight: "bold", color: "#121212", marginTop: 4 }}>{totalHintUses.toLocaleString()}</div>
+          <div style={{ fontSize: 11, color: "#777", marginTop: 4, lineHeight: 1.5 }}>
+            {totalHintGames.toLocaleString()} game{totalHintGames === 1 ? "" : "s"} · {hintPct}% of players
+            {(totalHintUp + totalHintDown) > 0 && <><br />helpful? 👍 {totalHintUp} · 👎 {totalHintDown}</>}
+          </div>
         </div>
       </div>
 

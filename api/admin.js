@@ -156,6 +156,12 @@ async function adminStats(req, res) {
       countries,
       imageShares: obj.imageShares || 0,
       textShares: obj.textShares || 0,
+      // Hint signals: hintGames = players who used >=1 clue; hintUses = total
+      // clues; hintVoteUp/Down = "was it helpful?" votes.
+      hintGames: obj.hintGames || 0,
+      hintUses: obj.hintUses || 0,
+      hintVoteUp: obj.hintVoteUp || 0,
+      hintVoteDown: obj.hintVoteDown || 0,
     };
   }
 
