@@ -20,10 +20,15 @@ import {
   queueLengths,
   refillQueues,
   dailyPop,
+  kvGet,
+  kvSet,
 } from './generate-headlines.js';
 import { waitUntil } from '@vercel/functions';
 
 const PREWARM_DAYS = 7; // today + next 6
+// A refill is a paid Claude batch (~$0.20). Cap how often the (hourly) cron will
+// pay for one, so a supply-capped category can't make it refill every run.
+const REFILL_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000; // ~once per day
 const ALERT_EMAIL_TO = 'thwilford@gmail.com';
 // onboarding@resend.dev is Resend's default sender — works without needing to
 // verify a custom domain. Swap to e.g. 'alerts@headlines.games' once the
@@ -65,13 +70,28 @@ async function runMaintenance(log, { force, dryRun }) {
   result.queuesBefore = before;
 
   const safetyFloor = PREWARM_DAYS + REFILL_THRESHOLD;
-  const needsRefill = force || CATEGORIES.some((c) => (before[c] ?? 0) < safetyFloor);
+  const anyLow = CATEGORIES.some((c) => (before[c] ?? 0) < safetyFloor);
+
+  // Cost guard. Some categories are supply-capped and can NEVER reach the safety
+  // floor, so "any queue low" was true on every hourly run — and the cron paid
+  // for a full refill batch each time (~$5/day). Now we refill at most once per
+  // REFILL_MIN_INTERVAL. This does NOT risk availability: queues hold days of
+  // buffer, a day consumes ~1 per category, and dailyPop always yields a valid
+  // 5-headline edition (spare-category fallback) even if one queue empties
+  // between refills. `?force=1` still overrides for manual runs.
+  const lastRefillAt = Number(await kvGet('usage:last_refill_at', log)) || 0;
+  const hoursSinceLast = (Date.now() - lastRefillAt) / 3.6e6;
+  const refilledRecently = Date.now() - lastRefillAt < REFILL_MIN_INTERVAL_MS;
+  const needsRefill = force || (anyLow && !refilledRecently);
+  result.refillDecision = { anyLow, refilledRecently, hoursSinceLast: Number(hoursSinceLast.toFixed(1)) };
+
   if (needsRefill) {
-    log('refilling queues', { force, dryRun, threshold: safetyFloor });
+    log('refilling queues', { force, dryRun, anyLow, hoursSinceLast: hoursSinceLast.toFixed(1) });
     result.refill = await refillQueues(log, { dryRun });
+    if (!dryRun) await kvSet('usage:last_refill_at', Date.now(), log);
     result.queuesAfter = await queueLengths(log);
   } else {
-    log('queues healthy — skipping refill');
+    log('skipping refill', { anyLow, refilledRecently, hoursSinceLast: hoursSinceLast.toFixed(1) });
   }
 
   if (dryRun) { result.dryRun = true; return result; }
