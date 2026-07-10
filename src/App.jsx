@@ -1849,6 +1849,11 @@ function SignInModal({ open, onClose, onSignedIn, getMigrate, reason }) {
             <button className="btn-green" disabled={busy || !email.includes("@")} onClick={sendCode} style={{ width: "100%", opacity: busy || !email.includes("@") ? 0.6 : 1 }}>
               {busy ? "Sending…" : "Email me a code →"}
             </button>
+            {/* Passwordless: the same email-code flow signs returning users in.
+                Say so, since the header reads as sign-up only. */}
+            <div style={{ fontSize: 12.5, color: "#888", marginTop: 12, textAlign: "center", lineHeight: 1.4 }}>
+              Already have an account? Enter the same email — it signs you straight in.
+            </div>
           </>
         ) : (
           <>
