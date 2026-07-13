@@ -151,7 +151,7 @@ const RANGE_OPTIONS = [
   { value: "month", label: "By month", days: null }, // resolves to selected month
 ];
 
-function AnalyticsTab({ stats, countriesAllTime }) {
+function AnalyticsTab({ stats, countriesAllTime, usage }) {
   const allDays = Object.keys(stats || {}).sort().reverse();
   const [range, setRange] = useState("30");
   // For "By month": which month? Defaults to most-recent month with data.
@@ -196,6 +196,11 @@ function AnalyticsTab({ stats, countriesAllTime }) {
   const totalVisits = visitCounts.reduce((a, b) => a + b, 0);
   const totalCompletions = playerCounts.reduce((a, b) => a + b, 0);
   const totalShares = shareCounts.reduce((a, b) => a + b, 0);
+  // Generation cost per day (from usage.byDay) — the app's own Claude spend.
+  const costValues = chartDays.map(d => Number(((usage?.byDay?.[d]?.cost) || 0).toFixed(2)));
+  const maxCost = Math.max(...costValues, 0.5);
+  const totalCost = costValues.reduce((a, b) => a + b, 0);
+  const anyCost = costValues.some(v => v > 0);
   // Hint signals across the range.
   const totalHintGames = chartDays.reduce((a, d) => a + (stats[d].hintGames || 0), 0);
   const totalHintUses = chartDays.reduce((a, d) => a + (stats[d].hintUses || 0), 0);
@@ -255,6 +260,15 @@ function AnalyticsTab({ stats, countriesAllTime }) {
         <div style={{ marginBottom: 30 }}>
           <h3 className="admin-h3" style={{ marginBottom: 12 }}>Daily Completions</h3>
           <DailyChart chartDays={chartDays} values={playerCounts} max={maxPlayers} />
+        </div>
+      )}
+
+      {anyCost && (
+        <div style={{ marginBottom: 30 }}>
+          <h3 className="admin-h3" style={{ marginBottom: 12 }}>
+            Daily Generation Cost <span style={{ fontSize: 12, color: "#666", fontWeight: "normal" }}>· Claude spend for this app · ${totalCost.toFixed(2)} over range · target ~$0.20/day</span>
+          </h3>
+          <DailyChart chartDays={chartDays} values={costValues} max={maxCost} color="#b8860b" />
         </div>
       )}
 
@@ -737,7 +751,7 @@ export default function Admin() {
           </button>
         </div>
 
-        {tab === "players" && <AnalyticsTab stats={stats || {}} countriesAllTime={countriesAllTime} />}
+        {tab === "players" && <AnalyticsTab stats={stats || {}} countriesAllTime={countriesAllTime} usage={usage} />}
         {tab === "headlines" && <HeadlinesTab days={headlineDays} loading={headlineDays === null} />}
         {tab === "difficulty" && <DifficultyTab stats={stats || {}} days={headlineDays} />}
         {tab === "feedback" && <FeedbackTab feedback={feedback} obscure={obscure} />}

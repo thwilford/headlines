@@ -185,6 +185,16 @@ async function adminStats(req, res) {
   const usageRaw = results[dateKeys.length * 3 + 1]?.result || [];
   const refills = usageRaw.map((s) => { try { return JSON.parse(s); } catch { return null; } }).filter(Boolean);
   const spent = refills.reduce((sum, r) => sum + (Number(r.cost) || 0), 0);
+  // Per-day generation spend from our own refill log — powers the admin daily-cost
+  // chart. Zero extra cost: just buckets data we already store.
+  const byDay = {};
+  for (const rf of refills) {
+    if (!rf?.ts) continue;
+    const d = new Date(rf.ts).toISOString().slice(0, 10);
+    if (!byDay[d]) byDay[d] = { cost: 0, batches: 0 };
+    byDay[d].cost += Number(rf.cost) || 0;
+    byDay[d].batches += 1;
+  }
   const usage = {
     budget: BUDGET_USD,
     spent,
@@ -193,6 +203,7 @@ async function adminStats(req, res) {
     refills: refills.length,
     firstRefillAt: refills[0]?.ts || null,
     lastRefillAt: refills[refills.length - 1]?.ts || null,
+    byDay,
   };
 
   return res.status(200).json({ stats, countriesAllTime, usage });

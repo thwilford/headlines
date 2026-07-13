@@ -20,8 +20,14 @@ import {
   queueLengths,
   refillQueues,
   dailyPop,
+  kvPipeline,
 } from './generate-headlines.js';
 import { waitUntil } from '@vercel/functions';
+
+// Runaway tripwire: email an alert if a single day's generation spend exceeds
+// this. Expected is ~1 batch/day (~$0.20), so $1 means a refill path is bypassing
+// the cost cap — catches any future runaway within ~an hour of the cron running.
+const DAILY_SPEND_ALERT_USD = 1.0;
 
 const PREWARM_DAYS = 7; // today + next 6
 // NOTE: the once-per-day cost cap now lives INSIDE refillQueues, so it applies
@@ -60,12 +66,52 @@ async function sendAlert(subject, text, log) {
   }
 }
 
+// Sum today's generation spend from usage:refills and email an alert (at most
+// once/day) if it's over DAILY_SPEND_ALERT_USD. Read-only — one Redis LRANGE, no
+// Claude call — so it costs nothing and catches any future cost runaway fast.
+async function checkSpendTripwire(log) {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const r = await kvPipeline([['LRANGE', 'usage:refills', '-400', '-1']], log);
+    const raw = r?.[0]?.result || [];
+    let spend = 0, count = 0;
+    for (const s of raw) {
+      let e; try { e = JSON.parse(s); } catch { continue; }
+      if (e?.ts && new Date(e.ts).toISOString().slice(0, 10) === today) { spend += Number(e.cost) || 0; count++; }
+    }
+    spend = Number(spend.toFixed(2));
+    if (spend <= DAILY_SPEND_ALERT_USD) return { today, spend, count, alerted: false };
+    // One alert per day (SET NX, expires in 2 days).
+    const claim = await kvPipeline([['SET', `usage:spend_alert:${today}`, '1', 'NX', 'EX', '172800']], log);
+    if (claim?.[0]?.result !== 'OK') return { today, spend, count, alerted: false, already: true };
+    await sendAlert(
+      `Headlines — generation spend $${spend.toFixed(2)} today (over $${DAILY_SPEND_ALERT_USD} tripwire)`,
+      [
+        `Heads up: today's (${today}) Claude generation spend is $${spend.toFixed(2)} across ${count} refill batch(es) — above the $${DAILY_SPEND_ALERT_USD}/day tripwire.`,
+        '',
+        'Expected is ~1 batch/day (~$0.20). More than that means a refill path is bypassing the once-per-day cost cap — check the cron and refillQueues.',
+        '',
+        `Time: ${new Date().toISOString()}`,
+      ].join('\n'),
+      log
+    );
+    return { today, spend, count, alerted: true };
+  } catch (e) {
+    log?.('spend tripwire failed', { error: e.message });
+    return { error: e.message };
+  }
+}
+
 // The actual maintenance: queue check → refill (if low) → pre-warm window.
 // Returns a result object; throws on unexpected error (caller alerts + catches).
 async function runMaintenance(log, { force, dryRun }) {
   const result = {};
   const before = await queueLengths(log);
   result.queuesBefore = before;
+
+  // Cost tripwire — emails if today's generation spend runs away. Cheap, no-op
+  // most runs. Runs before the refill/pre-warm so it fires even on early returns.
+  result.spendTripwire = await checkSpendTripwire(log);
 
   const safetyFloor = PREWARM_DAYS + REFILL_THRESHOLD;
   const anyLow = CATEGORIES.some((c) => (before[c] ?? 0) < safetyFloor);
