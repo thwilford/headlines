@@ -1,10 +1,11 @@
 // Headline maintenance cron. Designed to be run FREQUENTLY (hourly via
 // cron-job.org), not just once a day — each run does at most ONE unit of
 // expensive work so it can never exceed the function time limit:
-//   1. Check category queue lengths. If any is below the safety floor
-//      (REFILL_THRESHOLD + PREWARM_DAYS), run ONE refill batch and STOP.
-//      A refill is a single ~3-min Claude call; stopping here prevents a second
-//      emergency refill from stacking on top during pre-warm and timing out.
+//   1. Measure per-category days-of-cover. If the 2nd-thinnest category dips
+//      below the cover threshold (or any one category is critically low), run
+//      ONE refill batch and STOP. A refill is a single ~3-min Claude call;
+//      stopping here prevents a second emergency refill stacking on during
+//      pre-warm and timing out.
 //   2. If queues are healthy, pre-warm the rolling window (today + next N-1
 //      days) into headlines:YYYY-MM-DD — fast pops, no Claude calls — so admin
 //      can preview them and they're stable on arrival. Idempotent on cache hit.
@@ -16,7 +17,6 @@
 
 import {
   CATEGORIES,
-  REFILL_THRESHOLD,
   queueLengths,
   refillQueues,
   dailyPop,
@@ -102,6 +102,94 @@ async function checkSpendTripwire(log) {
   }
 }
 
+// Cadence check — read-only, no Claude call. Two health signals over the last
+// 7 days, each a quality/cost early-warning:
+//   • spare-substitution rate: how often dailyPop had to fill a slot from a
+//     fallback category. >2/week means a category is drying up and content is at
+//     risk of repeating (the thing we most want to avoid). Quality signal.
+//   • refill batch cadence: >7 batches/week means the once-per-day cost cap is
+//     leaking (cost signal); a gap of >10 days means generation has stalled and
+//     queues will eventually starve (availability signal).
+// Alerts at most once/day (SET NX) so a persistent condition doesn't spam.
+const SPARE_SUB_ALERT_7D = 2;   // alert if more than this many spare subs in 7 days
+const REFILL_BATCH_ALERT_7D = 7; // alert if more than this many refill batches in 7 days
+const REFILL_STALL_DAYS = 10;    // alert if no refill batch for longer than this
+async function checkCadence(log) {
+  try {
+    const now = Date.now();
+    const weekAgo = now - 7 * 864e5;
+    // Monitoring floor: the "batches > 7/week" alert must not count refill
+    // history from BEFORE this cadence check went live — otherwise the old
+    // pre-cap hourly-leak entries (~24/day) sitting in usage:refills would trip
+    // the alert on the very first run. Stamp a start-of-monitoring timestamp
+    // once (SET NX) and only count batches at/after it. After ~7 days the
+    // rolling weekAgo window overtakes it and this floor becomes a no-op.
+    const sinceR = await kvPipeline([
+      ['SET', 'usage:cadence_since', String(now), 'NX'],
+      ['GET', 'usage:cadence_since'],
+    ], log);
+    const cadenceSince = Number(sinceR?.[1]?.result) || now;
+    const batchFloor = Math.max(weekAgo, cadenceSince);
+
+    const [subsR, refillsR] = await Promise.all([
+      kvPipeline([['LRANGE', 'usage:spare_subs', '0', '499']], log),
+      kvPipeline([['LRANGE', 'usage:refills', '-400', '-1']], log),
+    ]);
+
+    const subsRaw = subsR?.[0]?.result || [];
+    let subs7 = 0;
+    for (const s of subsRaw) {
+      let e; try { e = JSON.parse(s); } catch { continue; }
+      if (Number(e?.ts) >= weekAgo) subs7++;
+    }
+
+    const refillsRaw = refillsR?.[0]?.result || [];
+    let batches7 = 0, lastRefillTs = 0;
+    for (const s of refillsRaw) {
+      let e; try { e = JSON.parse(s); } catch { continue; }
+      const t = Number(e?.ts) || 0;
+      if (t > lastRefillTs) lastRefillTs = t;   // real last-refill, from FULL history
+      if (t >= batchFloor) batches7++;          // count only since monitoring began
+    }
+    const daysSinceRefill = lastRefillTs ? (now - lastRefillTs) / 864e5 : Infinity;
+
+    const problems = [];
+    if (subs7 > SPARE_SUB_ALERT_7D) problems.push(`Spare-substitution fallback fired ${subs7}× in the last 7 days (> ${SPARE_SUB_ALERT_7D}). A category is likely running dry — served content is at risk of repeating.`);
+    if (batches7 > REFILL_BATCH_ALERT_7D) problems.push(`${batches7} refill batches since monitoring began (${new Date(batchFloor).toISOString().slice(0, 10)}) (> ${REFILL_BATCH_ALERT_7D}). The once-per-day cost cap may be leaking — expected ≤7/week (~1/day).`);
+    if (daysSinceRefill > REFILL_STALL_DAYS) problems.push(`No refill batch for ${daysSinceRefill === Infinity ? 'as far back as records go' : daysSinceRefill.toFixed(1) + ' days'} (> ${REFILL_STALL_DAYS}). Generation may be stalled — queues will eventually starve.`);
+
+    const result = {
+      subs7,
+      batches7,
+      batchesSince: new Date(batchFloor).toISOString(),
+      daysSinceRefill: daysSinceRefill === Infinity ? null : Number(daysSinceRefill.toFixed(1)),
+      alerted: false,
+    };
+    if (!problems.length) return result;
+
+    const today = new Date().toISOString().slice(0, 10);
+    const claim = await kvPipeline([['SET', `usage:cadence_alert:${today}`, '1', 'NX', 'EX', '172800']], log);
+    if (claim?.[0]?.result !== 'OK') return { ...result, problems, already: true };
+    await sendAlert(
+      `Headlines — cadence check flagged ${problems.length} issue(s)`,
+      [
+        'The maintenance cron cadence check flagged the following (last 7 days):',
+        '',
+        ...problems.map((p) => '• ' + p),
+        '',
+        `Spare subs: ${subs7} · Refill batches: ${batches7} · Days since last refill: ${result.daysSinceRefill ?? 'n/a'}`,
+        '',
+        `Time: ${new Date().toISOString()}`,
+      ].join('\n'),
+      log
+    );
+    return { ...result, alerted: true, problems };
+  } catch (e) {
+    log?.('cadence check failed', { error: e.message });
+    return { error: e.message };
+  }
+}
+
 // The actual maintenance: queue check → refill (if low) → pre-warm window.
 // Returns a result object; throws on unexpected error (caller alerts + catches).
 async function runMaintenance(log, { force, dryRun }) {
@@ -113,19 +201,52 @@ async function runMaintenance(log, { force, dryRun }) {
   // most runs. Runs before the refill/pre-warm so it fires even on early returns.
   result.spendTripwire = await checkSpendTripwire(log);
 
-  const safetyFloor = PREWARM_DAYS + REFILL_THRESHOLD;
-  const anyLow = CATEGORIES.some((c) => (before[c] ?? 0) < safetyFloor);
+  // Cadence check — quality/cost early-warning over the last 7 days. Read-only.
+  result.cadence = await checkCadence(log);
 
-  // Ask for a refill when a queue is low (or forced). refillQueues enforces the
+  // DEMAND-DRIVEN refill trigger. The old rule ("any queue below a flat floor")
+  // fired almost every day because over-stocked categories don't stop the thin
+  // ones dipping under an absolute threshold. Instead, measure days-of-cover per
+  // category = servable ÷ daily consumption, and trigger on the 2ND-LOWEST, not
+  // the lowest. Rationale: an edition needs 5 DISTINCT categories, and the
+  // spare-category fallback can cover exactly ONE dry category without repeating
+  // content. So a single thin category is survivable; the moment a SECOND one
+  // runs low we're at risk of the seed-fallback (repeated headlines), which is
+  // exactly what we must avoid. Override: if ANY one category is critically low
+  // (< MIN_SERVABLE), refill regardless — don't wait for a second to join it.
+  //   servable   = raw queue length × SAFETY_FACTOR (dedup/skew haircut)
+  //   consumption = ~headlines drawn from that category per day
+  const SAFETY_FACTOR = 0.7;
+  const consumptionOf = (c) => (c === 'Sport' ? 0.57 : 0.89);
+  const REFILL_COVER_DAYS = 10; // trigger when 2nd-thinnest category dips below this
+  const MIN_SERVABLE = 5;       // ...or any single category below this servable count
+  const cover = {};
+  let minServable = Infinity;
+  for (const c of CATEGORIES) {
+    const servable = (before[c] ?? 0) * SAFETY_FACTOR;
+    cover[c] = servable / consumptionOf(c);
+    if (servable < minServable) minServable = servable;
+  }
+  const coversAsc = Object.values(cover).sort((a, b) => a - b);
+  const secondLowestCover = coversAsc.length > 1 ? coversAsc[1] : (coversAsc[0] ?? 0);
+  const needRefill = secondLowestCover < REFILL_COVER_DAYS || minServable < MIN_SERVABLE;
+  result.demand = {
+    cover: Object.fromEntries(Object.entries(cover).map(([c, v]) => [c, Number(v.toFixed(1))])),
+    secondLowestCover: Number(secondLowestCover.toFixed(1)),
+    minServable: Number(minServable.toFixed(1)),
+    needRefill,
+  };
+
+  // Ask for a refill when demand says so (or forced). refillQueues enforces the
   // once-per-day cost cap ITSELF, so on most hourly runs this is a free no-op
   // ({ skipped: true }) and only pays for a Claude batch ~once/day. Availability
   // is unaffected — dailyPop always yields a valid 5-headline edition via the
   // spare-category fallback even if a queue is empty between refills.
   let didRefill = false;
-  if (force || anyLow) {
+  if (force || needRefill) {
     result.refill = await refillQueues(log, { dryRun, force });
     didRefill = !dryRun && !result.refill?.skipped;
-    log('refill requested', { force, dryRun, anyLow, didRefill, skipped: result.refill?.skipped || false });
+    log('refill requested', { force, dryRun, needRefill, ...result.demand, didRefill, skipped: result.refill?.skipped || false });
     result.queuesAfter = await queueLengths(log);
   } else {
     log('queues healthy — no refill requested');

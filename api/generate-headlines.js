@@ -32,6 +32,19 @@ export const CATEGORIES = [
   'Science & Tech',
 ];
 
+// Per-category editorial briefs, VERBATIM from the original refill prompt. Kept as
+// data (not inline) purely so a refill batch can request a SUBSET of categories
+// (skipping ones already over-stocked) without touching the wording. Do not edit
+// this text — it is the recognisability/quality bar the prompt depends on.
+const CATEGORY_BRIEFS = {
+  'Sport': "pick moments recognised WELL BEYOND dedicated sports fans, and DELIBERATELY MIX men's and women's sport. Sport skews male in both coverage and audience, so a board of men's-league minutiae quietly locks out half the players. Favour: Olympics (summer & winter), World Cups, barrier-breaking or first-of-its-kind moments (e.g. Billie Jean King's Battle of the Sexes, the first women's Olympic marathon, Jesse Owens in 1936, Nadia Comăneci's perfect 10), globally-followed athletes, era-defining upsets, records, tragedies and controversies. AVOID deep-cut single-country league detail, obscure transfers, and anything only a devoted fan of one men's sport would recognise — those skew the game toward one half of the audience. Every sport pick should be one a well-read non-fan of EITHER gender could plausibly place.",
+  'Arts & Culture': "music releases / chart-toppers / tours, film (Oscars, premieres, box office), TV (finales, premieres, ratings hits), celebrity moments, royalty (weddings, deaths, coronations), fashion, art, books, awards, theatre",
+  'Politics & World': "elections, leaders taking/leaving office, treaties, summits, sovereignty changes, peace deals, diplomatic milestones, political scandals, referendums",
+  'Disasters & Conflict': "wars (declarations, key battles, ends), terrorism, natural disasters, industrial disasters, revolutions, dramatic violent events",
+  'Business & Money': "stock market crashes, corporate sagas, economic crises, financial scandals, major mergers, IPOs, bankruptcies, currency events",
+  'Science & Tech': "discoveries, inventions, space, medicine, aviation milestones, computing/internet milestones",
+};
+
 // When pulling from a category queue, also try these legacy queue keys in
 // order. Lets us drain pre-generated items from the older naming schemes
 // without losing any pre-generated content.
@@ -231,6 +244,13 @@ const REFILL_THRESHOLD = 3;    // refill when any queue drops below this
 // trigger one — the scheduled cron refill AND dailyPop's emergency refill.
 const REFILL_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000; // ~once per day
 const PER_CATEGORY_TARGET = 10; // each refill adds ~this many per category
+// Cost control: a refill batch skips categories already this well-stocked, so we
+// don't pay to over-generate Arts/Business (which pile up) while still topping up
+// the thin ones. NEVER skip THIN_CATEGORIES — those are supply-limited and rely
+// on every batch's trickle to stay above empty. The avoid-list still spans ALL
+// queues regardless, so skipping a category can't cause a duplicate.
+const CATEGORY_CEILING = 25; // > this many already queued → omit from the batch
+const THIN_CATEGORIES = ['Disasters & Conflict', 'Science & Tech'];
 // Two windows on purpose: the SERVER enforces 365-day dedup (the actual product
 // rule "no repeats unless over 1 year ago"), while the PROMPT shows the model
 // only the most recent ~60 days. Showing the model the full 365-day list
@@ -472,26 +492,53 @@ export async function dailyPop(date, log) {
     const spare = CATEGORIES.find((c) => !todaysCategories.includes(c));
     const fillMatcher = createAvoidMatcher(recentForPop);
     const presentCats = new Set();
+    const spareSubs = []; // record each substitution so the cron can alert on drift
     for (const it of popped) if (it) { fillMatcher.add(it); if (it.category) presentCats.add(it.category); }
     for (let i = 0; i < todaysCategories.length; i++) {
       if (popped[i]) continue;
       // Candidate fill categories, in priority order: the spare first, then any
       // other category — each excluded once it's already on the board (which
-      // includes slots we filled earlier in this same loop).
-      const candidates = [spare, ...CATEGORIES].filter(
-        (c, idx, a) => c && !presentCats.has(c) && a.indexOf(c) === idx
-      );
+      // includes slots we filled earlier in this same loop). Sport is forced to
+      // LAST regardless of where it lands above: it's already throttled to ~4
+      // days in 7 by the serve-time gate, and letting it jump into spare slots
+      // would quietly undo that throttle and over-serve Sport. Only reach for a
+      // Sport substitute when literally nothing else can fill the slot.
+      const candidates = [spare, ...CATEGORIES]
+        .filter((c, idx, a) => c && !presentCats.has(c) && a.indexOf(c) === idx)
+        .sort((a, b) => (a === 'Sport' ? 1 : 0) - (b === 'Sport' ? 1 : 0));
       for (const cand of candidates) {
         const [fillItem] = await popOnePerCategoryWithFallback([cand], log, fillMatcher);
         if (fillItem) {
           popped[i] = fillItem;
-          presentCats.add(fillItem.category || cand);
-          log?.('filled empty slot from alternate category', { slot: i, wanted: todaysCategories[i], filledFrom: cand });
+          const filledFrom = fillItem.category || cand;
+          presentCats.add(filledFrom);
+          // Only record a GENUINE substitution — i.e. the slot for one category
+          // was filled from a DIFFERENT category. If the wanted category itself
+          // yielded on retry (filledFrom === wanted) that's a normal pop, not a
+          // fallback, and must not inflate the spare-sub alert metric.
+          if (filledFrom !== todaysCategories[i]) {
+            spareSubs.push({ date, slot: i, wanted: todaysCategories[i], filledFrom });
+          }
+          log?.('filled empty slot from alternate category', { slot: i, wanted: todaysCategories[i], filledFrom });
           break;
         }
       }
     }
     stillMissing = todaysCategories.filter((_, i) => !popped[i]);
+
+    if (spareSubs.length) {
+      // Record spare-substitution events so the cron can alert if we're leaning
+      // on the fallback too often — a rising rate means a category is drying up
+      // and content is at risk of repeating. Best-effort; never break serving.
+      try {
+        const stamp = Date.now();
+        const cmds = spareSubs.map((s) => ['LPUSH', 'usage:spare_subs', JSON.stringify({ ts: stamp, ...s })]);
+        cmds.push(['LTRIM', 'usage:spare_subs', '0', '499']);
+        await kvPipeline(cmds, log);
+      } catch (e) {
+        log?.('spare-sub record failed', { error: e.message });
+      }
+    }
   }
 
   if (stillMissing.length > 0) {
@@ -595,6 +642,12 @@ export async function refillQueues(log, { dryRun = false, force = false } = {}) 
   // unless forced/dryRun. Availability is unaffected: dailyPop always yields a
   // valid 5-headline edition via the spare-category fallback even if a queue is
   // empty between refills.
+  //
+  // force=true is the DELIBERATE MANUAL LEVER (`?force=1` on the cron): it
+  // bypasses BOTH the demand-driven trigger (in runMaintenance) AND this 20h
+  // cost cap, forcing a paid batch immediately. That's intentional — it's how a
+  // human restocks empty queues on demand (e.g. bridging a content gap). It is
+  // NOT reachable by any automated path, so it can't cause a runaway on its own.
   if (!dryRun && !force) {
     const last = Number(await kvGet('usage:last_refill_at', log)) || 0;
     if (Date.now() - last < REFILL_MIN_INTERVAL_MS) {
@@ -632,7 +685,15 @@ export async function refillQueues(log, { dryRun = false, force = false } = {}) 
   const obscureExamples = await readObscureExamples(log);
 
   const target = PER_CATEGORY_TARGET;
-  const totalRequested = target * CATEGORIES.length;
+  // Request only categories that actually need topping up. Over-stocked ones
+  // (> CATEGORY_CEILING queued) are omitted to cut output tokens; thin ones are
+  // always requested so their trickle never stops. Dedup is unaffected — the
+  // avoid list below is built from ALL queues, not just the requested ones.
+  const queueLens = await queueLengths(log);
+  const requestedCategories = CATEGORIES.filter(
+    (c) => THIN_CATEGORIES.includes(c) || (queueLens[c] ?? 0) <= CATEGORY_CEILING
+  );
+  const totalRequested = target * requestedCategories.length;
 
   // Build a (decade x overall) distribution of used events so the prompt can
   // steer the model toward under-represented eras. Computed across the full
@@ -654,7 +715,8 @@ export async function refillQueues(log, { dryRun = false, force = false } = {}) 
   }
   const distribution = { eras: eraCounts, totalUsed: recentUsed.length };
 
-  const prompt = buildRefillPrompt({ target, totalRequested, avoidDescriptions, distribution, obscureExamples });
+  const prompt = buildRefillPrompt({ target, totalRequested, categories: requestedCategories, avoidDescriptions, distribution, obscureExamples });
+  log?.('refill batch categories', { requested: requestedCategories, skipped: CATEGORIES.filter((c) => !requestedCategories.includes(c)), queueLens });
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -665,7 +727,7 @@ export async function refillQueues(log, { dryRun = false, force = false } = {}) 
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 16000,
+      max_tokens: 24000,
       messages: [{ role: 'user', content: prompt }],
     }),
   });
@@ -838,7 +900,13 @@ const PERMANENT_BANNED_TOPICS = [
   'Birth of Louise Brown / first IVF baby / first test-tube baby / any in-vitro fertilisation milestone',
 ];
 
-function buildRefillPrompt({ target, totalRequested, avoidDescriptions, distribution, obscureExamples = [] }) {
+function buildRefillPrompt({ target, totalRequested, categories = CATEGORIES, avoidDescriptions, distribution, obscureExamples = [] }) {
+  // Numbered category list, built from CATEGORY_BRIEFS for only the requested
+  // categories (verbatim text — see the map). Lets a batch skip over-stocked
+  // categories without changing any editorial wording.
+  const categoryBriefsBlock = categories
+    .map((c, i) => `${i + 1}. **${c}** — ${CATEGORY_BRIEFS[c]}`)
+    .join('\n');
   const avoidSection = avoidDescriptions.length
     ? avoidDescriptions.map((d) => `- ${d}`).join('\n')
     : '(none yet — this is the first batch)';
@@ -865,14 +933,9 @@ function buildRefillPrompt({ target, totalRequested, avoidDescriptions, distribu
 
   return `You are generating a batch of real historical newspaper headlines for a daily year-guessing game (Wordle meets pub quiz).
 
-Produce EXACTLY ${target} headlines in EACH of these 6 categories — total ${totalRequested} headlines:
+Produce EXACTLY ${target} headlines in EACH of these ${categories.length} categories — total ${totalRequested} headlines:
 
-1. **Sport** — pick moments recognised WELL BEYOND dedicated sports fans, and DELIBERATELY MIX men's and women's sport. Sport skews male in both coverage and audience, so a board of men's-league minutiae quietly locks out half the players. Favour: Olympics (summer & winter), World Cups, barrier-breaking or first-of-its-kind moments (e.g. Billie Jean King's Battle of the Sexes, the first women's Olympic marathon, Jesse Owens in 1936, Nadia Comăneci's perfect 10), globally-followed athletes, era-defining upsets, records, tragedies and controversies. AVOID deep-cut single-country league detail, obscure transfers, and anything only a devoted fan of one men's sport would recognise — those skew the game toward one half of the audience. Every sport pick should be one a well-read non-fan of EITHER gender could plausibly place.
-2. **Arts & Culture** — music releases / chart-toppers / tours, film (Oscars, premieres, box office), TV (finales, premieres, ratings hits), celebrity moments, royalty (weddings, deaths, coronations), fashion, art, books, awards, theatre
-3. **Politics & World** — elections, leaders taking/leaving office, treaties, summits, sovereignty changes, peace deals, diplomatic milestones, political scandals, referendums
-4. **Disasters & Conflict** — wars (declarations, key battles, ends), terrorism, natural disasters, industrial disasters, revolutions, dramatic violent events
-5. **Business & Money** — stock market crashes, corporate sagas, economic crises, financial scandals, major mergers, IPOs, bankruptcies, currency events
-6. **Science & Tech** — discoveries, inventions, space, medicine, aviation milestones, computing/internet milestones
+${categoryBriefsBlock}
 
 PERMANENTLY BANNED TOPICS — never include a headline on any of these, ever:
 ${permanentBanSection}
