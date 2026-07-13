@@ -227,6 +227,9 @@ function createAvoidMatcher(entries) {
 }
 
 const REFILL_THRESHOLD = 3;    // refill when any queue drops below this
+// A refill is a paid Claude batch (~$0.20). Bound how often ANY caller can
+// trigger one — the scheduled cron refill AND dailyPop's emergency refill.
+const REFILL_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000; // ~once per day
 const PER_CATEGORY_TARGET = 10; // each refill adds ~this many per category
 // Two windows on purpose: the SERVER enforces 365-day dedup (the actual product
 // rule "no repeats unless over 1 year ago"), while the PROMPT shows the model
@@ -584,7 +587,23 @@ async function popOnePerCategoryWithFallback(categories, log, matcher = createAv
 }
 
 // ── Refill: one Claude call → bucket into category queues ─────────────────
-export async function refillQueues(log, { dryRun = false } = {}) {
+export async function refillQueues(log, { dryRun = false, force = false } = {}) {
+  // GLOBAL cost cap. A refill is a paid Claude call, so bound how often ANY
+  // caller can trigger one: the cron's scheduled refill AND — critically —
+  // dailyPop's emergency refill, which the cron's hourly pre-warm was firing
+  // uncapped (the real leak). Skip if we refilled within REFILL_MIN_INTERVAL,
+  // unless forced/dryRun. Availability is unaffected: dailyPop always yields a
+  // valid 5-headline edition via the spare-category fallback even if a queue is
+  // empty between refills.
+  if (!dryRun && !force) {
+    const last = Number(await kvGet('usage:last_refill_at', log)) || 0;
+    if (Date.now() - last < REFILL_MIN_INTERVAL_MS) {
+      log?.('refill skipped — within cost-cap interval', { hoursSinceLast: ((Date.now() - last) / 3.6e6).toFixed(1) });
+      return { skipped: true, reason: 'cost-cap' };
+    }
+    // Claim the slot up front so a slow/failed refill can't be retried in a loop.
+    await kvSet('usage:last_refill_at', Date.now(), log);
+  }
   const [usedRaw, pendingByCat] = await Promise.all([
     kvGet('used_events', log),
     readQueues(log),

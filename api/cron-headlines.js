@@ -20,15 +20,13 @@ import {
   queueLengths,
   refillQueues,
   dailyPop,
-  kvGet,
-  kvSet,
 } from './generate-headlines.js';
 import { waitUntil } from '@vercel/functions';
 
 const PREWARM_DAYS = 7; // today + next 6
-// A refill is a paid Claude batch (~$0.20). Cap how often the (hourly) cron will
-// pay for one, so a supply-capped category can't make it refill every run.
-const REFILL_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000; // ~once per day
+// NOTE: the once-per-day cost cap now lives INSIDE refillQueues, so it applies
+// to every refill path (this cron AND dailyPop's emergency refill). The cron
+// just asks; refillQueues decides whether it's actually time to pay.
 const ALERT_EMAIL_TO = 'thwilford@gmail.com';
 // onboarding@resend.dev is Resend's default sender — works without needing to
 // verify a custom domain. Swap to e.g. 'alerts@headlines.games' once the
@@ -72,35 +70,27 @@ async function runMaintenance(log, { force, dryRun }) {
   const safetyFloor = PREWARM_DAYS + REFILL_THRESHOLD;
   const anyLow = CATEGORIES.some((c) => (before[c] ?? 0) < safetyFloor);
 
-  // Cost guard. Some categories are supply-capped and can NEVER reach the safety
-  // floor, so "any queue low" was true on every hourly run — and the cron paid
-  // for a full refill batch each time (~$5/day). Now we refill at most once per
-  // REFILL_MIN_INTERVAL. This does NOT risk availability: queues hold days of
-  // buffer, a day consumes ~1 per category, and dailyPop always yields a valid
-  // 5-headline edition (spare-category fallback) even if one queue empties
-  // between refills. `?force=1` still overrides for manual runs.
-  const lastRefillAt = Number(await kvGet('usage:last_refill_at', log)) || 0;
-  const hoursSinceLast = (Date.now() - lastRefillAt) / 3.6e6;
-  const refilledRecently = Date.now() - lastRefillAt < REFILL_MIN_INTERVAL_MS;
-  const needsRefill = force || (anyLow && !refilledRecently);
-  result.refillDecision = { anyLow, refilledRecently, hoursSinceLast: Number(hoursSinceLast.toFixed(1)) };
-
-  if (needsRefill) {
-    log('refilling queues', { force, dryRun, anyLow, hoursSinceLast: hoursSinceLast.toFixed(1) });
-    result.refill = await refillQueues(log, { dryRun });
-    if (!dryRun) await kvSet('usage:last_refill_at', Date.now(), log);
+  // Ask for a refill when a queue is low (or forced). refillQueues enforces the
+  // once-per-day cost cap ITSELF, so on most hourly runs this is a free no-op
+  // ({ skipped: true }) and only pays for a Claude batch ~once/day. Availability
+  // is unaffected — dailyPop always yields a valid 5-headline edition via the
+  // spare-category fallback even if a queue is empty between refills.
+  let didRefill = false;
+  if (force || anyLow) {
+    result.refill = await refillQueues(log, { dryRun, force });
+    didRefill = !dryRun && !result.refill?.skipped;
+    log('refill requested', { force, dryRun, anyLow, didRefill, skipped: result.refill?.skipped || false });
     result.queuesAfter = await queueLengths(log);
   } else {
-    log('skipping refill', { anyLow, refilledRecently, hoursSinceLast: hoursSinceLast.toFixed(1) });
+    log('queues healthy — no refill requested');
   }
 
   if (dryRun) { result.dryRun = true; return result; }
 
-  // A refill is one expensive Claude batch (~3 min). Don't also pre-warm on the
-  // same run — stop here and let the NEXT run (queues now healthy) do the fast
-  // pre-warm, so a single run never stacks two Claude batches past the limit.
-  if (needsRefill) {
-    log('refilled this run — deferring pre-warm to the next (healthy) run');
+  // Only defer pre-warm when an ACTUAL (paid) refill ran — a cost-capped skip is
+  // free, so we can safely pre-warm on the same run.
+  if (didRefill) {
+    log('refilled this run — deferring pre-warm to the next run');
     result.refilledOnly = true;
     return result;
   }
